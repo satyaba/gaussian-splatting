@@ -16,6 +16,7 @@ from utils.loss_utils import l1_loss, ssim
 from gaussian_renderer import render, network_gui
 import sys
 from scene import Scene, GaussianModel
+from scene.segmentation_decoder import SegmentationDecoder, save_decoder_checkpoint, load_decoder_checkpoint
 from utils.general_utils import safe_state, get_expon_lr_func
 import uuid
 from tqdm import tqdm
@@ -47,12 +48,34 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
-    gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
+    gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type, seg_encoding_dim=dataset.seg_encoding_dim)
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
+
+    # The rasterizer's channel count is a compile-time constant; keep Python-side
+    # config honest about it.
+    assert dataset.seg_encoding_dim == 32, "seg_encoding_dim must match NUM_SEG_CHANNELS in cuda_rasterizer/config.h (rebuild required to change)"
+
+    # Segmentation decoder: fully decoupled from GaussianModel — own optimizer,
+    # own checkpoint path (locked decision).
+    decoder = SegmentationDecoder(dataset.seg_encoding_dim, dataset.num_semantic_classes).cuda()
+    decoder_optimizer = torch.optim.Adam(decoder.parameters(), lr=opt.decoder_lr_init)
+    decoder_lr_decay_args = get_expon_lr_func(opt.decoder_lr_init, opt.decoder_lr_final,
+                                              max_steps=max(1, opt.decoder_lr_decay_iters))
+
+    def get_decoder_lr(it):
+        # Flat until decay_start, then exponential — decay begins BEFORE
+        # seg_warmup_iters ends so confidence stabilizes early (locked decision).
+        if it < opt.decoder_lr_decay_start:
+            return opt.decoder_lr_init
+        return decoder_lr_decay_args(it - opt.decoder_lr_decay_start)
+
+    if checkpoint:
+        decoder_iter = load_decoder_checkpoint(decoder, decoder_optimizer, scene.model_path + f"/decoder{first_iter}.pth")
+        assert decoder_iter == first_iter, f"decoder checkpoint iteration {decoder_iter} != gaussians checkpoint {first_iter}"
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -139,6 +162,20 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         else:
             Ll1depth = 0
 
+        # Segmentation decode — AFTER rasterization, in the training loop (the
+        # decoder compares decoded outputs across cameras for L_consist later).
+        rendered_seg = render_pkg["rendered_seg"]                       # [NUM_SEG_CHANNELS, H, W]
+        seg_logits = decoder(rendered_seg.permute(1, 2, 0))             # [H, W, num_semantic_classes]
+        gt_semantic = getattr(viewpoint_cam, "gt_semantic", None)
+        if gt_semantic is not None:
+            L_sem = torch.nn.functional.cross_entropy(
+                seg_logits.reshape(-1, dataset.num_semantic_classes),
+                gt_semantic.cuda().reshape(-1).long(),
+                ignore_index=-1)  # background/void mask rule: OPEN ITEM (doc 01 §6)
+            loss = loss + L_sem
+        for param_group in decoder_optimizer.param_groups:
+            param_group['lr'] = get_decoder_lr(iteration)
+
         loss.backward()
 
         iter_end.record()
@@ -159,6 +196,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
+                save_decoder_checkpoint(decoder, decoder_optimizer, iteration, scene.model_path + f"/decoder{iteration}.pth")
 
             # Densification
             if iteration < opt.densify_until_iter:
@@ -173,6 +211,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                     gaussians.reset_opacity()
 
+            # Confidence-gated splitting hook (deferred until the rendering
+            # path is verified correct — doc 01 §6). Uses decoded seg outputs
+            # and argmax-stability tracking once implemented.
+            if iteration > opt.seg_warmup_iters:
+                pass  # 4-way split + discounted-confidence inheritance hook in here
+
             # Optimizer step
             if iteration < opt.iterations:
                 gaussians.exposure_optimizer.step()
@@ -184,10 +228,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 else:
                     gaussians.optimizer.step()
                     gaussians.optimizer.zero_grad(set_to_none = True)
+                decoder_optimizer.step()
+                decoder_optimizer.zero_grad(set_to_none = True)
 
             if (iteration in checkpoint_iterations):
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
+                save_decoder_checkpoint(decoder, decoder_optimizer, iteration, scene.model_path + f"/decoder{iteration}.pth")
 
 def prepare_output_and_logger(args):    
     if not args.model_path:
