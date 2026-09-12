@@ -56,6 +56,8 @@ class ModelParams(ParamGroup):
         self.train_test_exp = False
         self.data_device = "cuda"
         self.eval = False
+        self.seg_encoding_dim = 32
+        self.num_semantic_classes = 88  # Replica fine-grained taxonomy
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):
@@ -97,6 +99,12 @@ class OptimizationParams(ParamGroup):
         self.depth_l1_weight_final = 0.01
         self.random_background = False
         self.optimizer_type = "default"
+        self.seg_encoding_lr = 0.0025
+        self.seg_warmup_iters = 10_000
+        self.decoder_lr_init = 0.001
+        self.decoder_lr_final = 0.0001
+        self.decoder_lr_decay_start = 7_000   # < seg_warmup_iters: decay begins before warmup ends (open tuning item)
+        self.decoder_lr_decay_iters = 15_000  # decay spans [decay_start, decay_start + decay_iters]
         super().__init__(parser, "Optimization Parameters")
 
 def get_combined_args(parser : ArgumentParser):
