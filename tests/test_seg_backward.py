@@ -13,6 +13,10 @@
 # time — this test is the guard).
 import torch
 from argparse import ArgumentParser
+import os
+import sys
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from gaussian_renderer import render
 from scene.gaussian_model import GaussianModel
