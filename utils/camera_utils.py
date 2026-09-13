@@ -11,6 +11,7 @@
 
 from scene.cameras import Camera
 import numpy as np
+import torch
 from utils.graphics_utils import fov2focal
 from PIL import Image
 import cv2
