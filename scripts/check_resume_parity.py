@@ -41,12 +41,17 @@ def main():
         sys.exit("No CUDA device — this check must run on the GPU box.")
 
     scene_dir = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "data", "toy")
+    # Optional 2nd arg: folder of uint8 class-id PNGs → passes --segmentation_path
+    # to train.py, activating L_seg (flips the parity assertions to "must move").
+    seg_arg = sys.argv[2] if len(sys.argv) > 2 else ""
     model_dir = os.path.join(ROOT, "output", "toy_parity")
     run(["rm", "-rf", model_dir])
     os.makedirs(model_dir, exist_ok=True)
 
     base = ["python", "train.py", "-s", scene_dir, "-m", model_dir,
             "--disable_viewer", "--quiet"]
+    if seg_arg:
+        base += ["--segmentation_path", seg_arg]
 
     print(f"== Phase A: train {ITERS_A} iters, checkpoint at {CKPT_ITER} ==")
     run(base + ["--iterations", str(ITERS_A),
