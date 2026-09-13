@@ -38,6 +38,23 @@ def loadCam(args, id, cam_info, resolution_scale, is_nerf_synthetic, is_test_dat
             raise
     else:
         invdepthmap = None
+
+    segmentation_map = None
+    if cam_info.segmentation_path != "":
+        seg_raw = cv2.imread(cam_info.segmentation_path, -1)
+        assert seg_raw is not None, f"Segmentation map not found: {cam_info.segmentation_path}"
+        if seg_raw.ndim == 3:
+            seg_raw = seg_raw[..., 0]
+        # Nearest-neighbor resize: class ids must never be blended.
+        seg = cv2.resize(seg_raw, resolution, interpolation=cv2.INTER_NEAREST).astype(np.int64)
+        void_mask = seg == 255
+        seg[void_mask] = -1  # ignore_index for cross-entropy (train.py)
+        valid = seg[~void_mask]
+        if valid.size:
+            assert valid.max() < args.num_segmentation_classes, \
+                f"{cam_info.segmentation_path}: class id {valid.max()} >= num_segmentation_classes " \
+                f"({args.num_segmentation_classes}) — taxonomy mismatch?"
+        segmentation_map = torch.from_numpy(seg)
         
     orig_w, orig_h = image.size
     if args.resolution in [1, 2, 4, 8]:
@@ -64,7 +81,8 @@ def loadCam(args, id, cam_info, resolution_scale, is_nerf_synthetic, is_test_dat
                   FoVx=cam_info.FovX, FoVy=cam_info.FovY, depth_params=cam_info.depth_params,
                   image=image, invdepthmap=invdepthmap,
                   image_name=cam_info.image_name, uid=id, data_device=args.data_device,
-                  train_test_exp=args.train_test_exp, is_test_dataset=is_test_dataset, is_test_view=cam_info.is_test)
+                  train_test_exp=args.train_test_exp, is_test_dataset=is_test_dataset, is_test_view=cam_info.is_test,
+                  segmentation_map=segmentation_map)
 
 def cameraList_from_camInfos(cam_infos, resolution_scale, args, is_nerf_synthetic, is_test_dataset):
     camera_list = []

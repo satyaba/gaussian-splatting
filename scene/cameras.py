@@ -20,7 +20,8 @@ class Camera(nn.Module):
     def __init__(self, resolution, colmap_id, R, T, FoVx, FoVy, depth_params, image, invdepthmap,
                  image_name, uid,
                  trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device = "cuda",
-                 train_test_exp = False, is_test_dataset = False, is_test_view = False
+                 train_test_exp = False, is_test_dataset = False, is_test_view = False,
+                 segmentation_map=None
                  ):
         super(Camera, self).__init__()
 
@@ -79,6 +80,10 @@ class Camera(nn.Module):
 
         self.zfar = 100.0
         self.znear = 0.01
+
+        # Per-view ground-truth segmentation: int64 class map [H, W] (255→-1 at load),
+        # or None when segmentation_path is unset — train.py gates L_seg on this.
+        self.gt_segmentation = segmentation_map.to(self.data_device) if segmentation_map is not None else None
 
         self.trans = trans
         self.scale = scale
