@@ -40,23 +40,6 @@ def loadCam(args, id, cam_info, resolution_scale, is_nerf_synthetic, is_test_dat
     else:
         invdepthmap = None
 
-    segmentation_map = None
-    if cam_info.segmentation_path != "":
-        seg_raw = cv2.imread(cam_info.segmentation_path, -1)
-        assert seg_raw is not None, f"Segmentation map not found: {cam_info.segmentation_path}"
-        if seg_raw.ndim == 3:
-            seg_raw = seg_raw[..., 0]
-        # Nearest-neighbor resize: class ids must never be blended.
-        seg = cv2.resize(seg_raw, resolution, interpolation=cv2.INTER_NEAREST).astype(np.int64)
-        void_mask = seg == 255
-        seg[void_mask] = -1  # ignore_index for cross-entropy (train.py)
-        valid = seg[~void_mask]
-        if valid.size:
-            assert valid.max() < args.num_segmentation_classes, \
-                f"{cam_info.segmentation_path}: class id {valid.max()} >= num_segmentation_classes " \
-                f"({args.num_segmentation_classes}) — taxonomy mismatch?"
-        segmentation_map = torch.from_numpy(seg)
-        
     orig_w, orig_h = image.size
     if args.resolution in [1, 2, 4, 8]:
         resolution = round(orig_w/(resolution_scale * args.resolution)), round(orig_h/(resolution_scale * args.resolution))
@@ -77,6 +60,25 @@ def loadCam(args, id, cam_info, resolution_scale, is_nerf_synthetic, is_test_dat
 
         scale = float(global_down) * float(resolution_scale)
         resolution = (int(orig_w / scale), int(orig_h / scale))
+
+    # Per-view segmentation GT: uint8 class-id PNG (255=void), read AFTER `resolution`
+    # is computed above so the nearest-neighbor resize targets the camera's grid.
+    segmentation_map = None
+    if cam_info.segmentation_path != "":
+        seg_raw = cv2.imread(cam_info.segmentation_path, -1)
+        assert seg_raw is not None, f"Segmentation map not found: {cam_info.segmentation_path}"
+        if seg_raw.ndim == 3:
+            seg_raw = seg_raw[..., 0]
+        # Nearest-neighbor resize: class ids must never be blended.
+        seg = cv2.resize(seg_raw, resolution, interpolation=cv2.INTER_NEAREST).astype(np.int64)
+        void_mask = seg == 255
+        seg[void_mask] = -1  # ignore_index for cross-entropy (train.py)
+        valid = seg[~void_mask]
+        if valid.size:
+            assert valid.max() < args.num_segmentation_classes, \
+                f"{cam_info.segmentation_path}: class id {valid.max()} >= num_segmentation_classes " \
+                f"({args.num_segmentation_classes}) — taxonomy mismatch?"
+        segmentation_map = torch.from_numpy(seg)
 
     return Camera(resolution, colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T, 
                   FoVx=cam_info.FovX, FoVy=cam_info.FovY, depth_params=cam_info.depth_params,
