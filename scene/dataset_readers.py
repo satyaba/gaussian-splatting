@@ -36,6 +36,7 @@ class CameraInfo(NamedTuple):
     width: int
     height: int
     is_test: bool
+    segmentation_path: str = ""
 
 class SceneInfo(NamedTuple):
     point_cloud: BasicPointCloud
@@ -68,7 +69,19 @@ def getNerfppNorm(cam_info):
 
     return {"translate": translate, "radius": radius}
 
-def readColmapCameras(cam_extrinsics, cam_intrinsics, depths_params, images_folder, depths_folder, test_cam_names_list):
+def _segmentation_path_for(segmentation_path, image_stem, is_test):
+    """Resolve the class-id PNG for one view: prefer <dir>/<split>/<stem>.png,
+    fall back to <dir>/<stem>.png. Returns "" when nothing exists (L_seg off)."""
+    if segmentation_path == "":
+        return ""
+    split = "test" if is_test else "train"
+    cand = os.path.join(segmentation_path, split, f"{image_stem}.png")
+    if os.path.exists(cand):
+        return cand
+    cand = os.path.join(segmentation_path, f"{image_stem}.png")
+    return cand if os.path.exists(cand) else ""
+
+def readColmapCameras(cam_extrinsics, cam_intrinsics, depths_params, images_folder, depths_folder, test_cam_names_list, segmentation_path=""):
     cam_infos = []
     for idx, key in enumerate(cam_extrinsics):
         sys.stdout.write('\r')
@@ -108,10 +121,13 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, depths_params, images_fold
         image_path = os.path.join(images_folder, extr.name)
         image_name = extr.name
         depth_path = os.path.join(depths_folder, f"{extr.name[:-n_remove]}.png") if depths_folder != "" else ""
+        is_test = image_name in test_cam_names_list
+        seg_path = _segmentation_path_for(segmentation_path, extr.name[:-n_remove], is_test)
 
         cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, depth_params=depth_params,
                               image_path=image_path, image_name=image_name, depth_path=depth_path,
-                              width=width, height=height, is_test=image_name in test_cam_names_list)
+                              width=width, height=height, is_test=is_test,
+                              segmentation_path=seg_path)
         cam_infos.append(cam_info)
 
     sys.stdout.write('\n')
@@ -142,7 +158,7 @@ def storePly(path, xyz, rgb):
     ply_data = PlyData([vertex_element])
     ply_data.write(path)
 
-def readColmapSceneInfo(path, images, depths, eval, train_test_exp, llffhold=8):
+def readColmapSceneInfo(path, images, depths, eval, train_test_exp, segmentation_path="", llffhold=8):
     try:
         cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.bin")
         cameras_intrinsic_file = os.path.join(path, "sparse/0", "cameras.bin")
@@ -194,7 +210,8 @@ def readColmapSceneInfo(path, images, depths, eval, train_test_exp, llffhold=8):
     cam_infos_unsorted = readColmapCameras(
         cam_extrinsics=cam_extrinsics, cam_intrinsics=cam_intrinsics, depths_params=depths_params,
         images_folder=os.path.join(path, reading_dir), 
-        depths_folder=os.path.join(path, depths) if depths != "" else "", test_cam_names_list=test_cam_names_list)
+        depths_folder=os.path.join(path, depths) if depths != "" else "", test_cam_names_list=test_cam_names_list,
+        segmentation_path=segmentation_path)
     cam_infos = sorted(cam_infos_unsorted.copy(), key = lambda x : x.image_name)
 
     train_cam_infos = [c for c in cam_infos if train_test_exp or not c.is_test]
@@ -225,7 +242,7 @@ def readColmapSceneInfo(path, images, depths, eval, train_test_exp, llffhold=8):
                            is_nerf_synthetic=False)
     return scene_info
 
-def readCamerasFromTransforms(path, transformsfile, depths_folder, white_background, is_test, extension=".png"):
+def readCamerasFromTransforms(path, transformsfile, depths_folder, white_background, is_test, segmentation_path="", extension=".png"):
     cam_infos = []
 
     with open(os.path.join(path, transformsfile)) as json_file:
@@ -263,20 +280,22 @@ def readCamerasFromTransforms(path, transformsfile, depths_folder, white_backgro
             FovX = fovx
 
             depth_path = os.path.join(depths_folder, f"{image_name}.png") if depths_folder != "" else ""
+            seg_path = _segmentation_path_for(segmentation_path, image_name, is_test)
 
             cam_infos.append(CameraInfo(uid=idx, R=R, T=T, FovY=FovY, FovX=FovX,
                             image_path=image_path, image_name=image_name,
-                            width=image.size[0], height=image.size[1], depth_path=depth_path, depth_params=None, is_test=is_test))
+                            width=image.size[0], height=image.size[1], depth_path=depth_path, depth_params=None, is_test=is_test,
+                            segmentation_path=seg_path))
             
     return cam_infos
 
-def readNerfSyntheticInfo(path, white_background, depths, eval, extension=".png"):
+def readNerfSyntheticInfo(path, white_background, depths, eval, segmentation_path="", extension=".png"):
 
     depths_folder=os.path.join(path, depths) if depths != "" else ""
     print("Reading Training Transforms")
-    train_cam_infos = readCamerasFromTransforms(path, "transforms_train.json", depths_folder, white_background, False, extension)
+    train_cam_infos = readCamerasFromTransforms(path, "transforms_train.json", depths_folder, white_background, False, segmentation_path, extension)
     print("Reading Test Transforms")
-    test_cam_infos = readCamerasFromTransforms(path, "transforms_test.json", depths_folder, white_background, True, extension)
+    test_cam_infos = readCamerasFromTransforms(path, "transforms_test.json", depths_folder, white_background, True, segmentation_path, extension)
     
     if not eval:
         train_cam_infos.extend(test_cam_infos)
