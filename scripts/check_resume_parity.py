@@ -31,7 +31,7 @@ def run(cmd):
 
 
 def load_chkpnt(path):
-    ckpt = torch.load(path, map_location="cpu")
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
     capture, iteration = ckpt
     return capture, iteration
 
@@ -66,7 +66,7 @@ def main():
     assert seg50.shape[1] == 32, f"seg encoding dim {seg50.shape[1]} != 32"
     print(f"   chkpnt50 OK: P={P}, seg_encoding[7] shape {tuple(seg50.shape)}")
 
-    dec50_state = torch.load(dec50, map_location="cpu")
+    dec50_state = torch.load(dec50, map_location="cpu", weights_only=False)
     assert dec50_state["iteration"] == CKPT_ITER
     assert any(k.startswith("linear") for k in dec50_state["model_state_dict"]), "decoder weights missing"
     assert len(dec50_state["optimizer_state_dict"]["state"]) > 0, "decoder optimizer state empty"
@@ -92,7 +92,7 @@ def main():
     assert xyz_moved > 0.0, "xyz did not change after resume — training did not continue"
     assert seg_moved > 0.0, "seg encoding did not change after resume"
 
-    dec100_state = torch.load(dec100, map_location="cpu")
+    dec100_state = torch.load(dec100, map_location="cpu", weights_only=False)
     assert dec100_state["iteration"] == ITERS_B
     w_moved = (dec50_state["model_state_dict"]["linear.weight"]
                - dec100_state["model_state_dict"]["linear.weight"]).abs().max().item()

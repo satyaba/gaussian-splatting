@@ -17,7 +17,7 @@ def save_decoder_checkpoint(decoder, decoder_optimizer, iteration, path):
     }, path)
 
 def load_decoder_checkpoint(decoder, decoder_optimizer, path):
-    ckpt = torch.load(path)
+    ckpt = torch.load(path, weights_only=False)
     decoder.load_state_dict(ckpt['model_state_dict'])
     decoder_optimizer.load_state_dict(ckpt['optimizer_state_dict'])
     return ckpt['iteration']
