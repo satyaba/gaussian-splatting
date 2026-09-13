@@ -61,7 +61,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     # Segmentation decoder: fully decoupled from GaussianModel — own optimizer,
     # own checkpoint path (locked decision).
-    decoder = SegmentationDecoder(dataset.seg_encoding_dim, dataset.num_semantic_classes).cuda()
+    decoder = SegmentationDecoder(dataset.seg_encoding_dim, dataset.num_segmentation_classes).cuda()
     decoder_optimizer = torch.optim.Adam(decoder.parameters(), lr=opt.decoder_lr_init)
     decoder_lr_decay_args = get_expon_lr_func(opt.decoder_lr_init, opt.decoder_lr_final,
                                               max_steps=max(1, opt.decoder_lr_decay_iters))
@@ -165,14 +165,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         # Segmentation decode — AFTER rasterization, in the training loop (the
         # decoder compares decoded outputs across cameras for L_consist later).
         rendered_seg = render_pkg["rendered_seg"]                       # [NUM_SEG_CHANNELS, H, W]
-        seg_logits = decoder(rendered_seg.permute(1, 2, 0))             # [H, W, num_semantic_classes]
-        gt_semantic = getattr(viewpoint_cam, "gt_semantic", None)
-        if gt_semantic is not None:
-            L_sem = torch.nn.functional.cross_entropy(
-                seg_logits.reshape(-1, dataset.num_semantic_classes),
-                gt_semantic.cuda().reshape(-1).long(),
+        seg_logits = decoder(rendered_seg.permute(1, 2, 0))             # [H, W, num_segmentation_classes]
+        gt_segmentation = getattr(viewpoint_cam, "gt_segmentation", None)
+        if gt_segmentation is not None:
+            L_seg = torch.nn.functional.cross_entropy(
+                seg_logits.reshape(-1, dataset.num_segmentation_classes),
+                gt_segmentation.cuda().reshape(-1).long(),
                 ignore_index=-1)  # background/void mask rule: OPEN ITEM (doc 01 §6)
-            loss = loss + L_sem
+            loss = loss + L_seg
         for param_group in decoder_optimizer.param_groups:
             param_group['lr'] = get_decoder_lr(iteration)
 

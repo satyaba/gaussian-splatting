@@ -57,7 +57,7 @@ class ModelParams(ParamGroup):
         self.data_device = "cuda"
         self.eval = False
         self.seg_encoding_dim = 32
-        self.num_semantic_classes = 88  # Replica fine-grained taxonomy
+        self.num_segmentation_classes = 88  # Replica fine-grained taxonomy
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):

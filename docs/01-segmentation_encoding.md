@@ -15,13 +15,13 @@ These are architectural decisions already made. An implementer should follow the
 | Decision | Resolution |
 |---|---|
 | Encoding dimensionality | Fixed at **32**, compile-time constant `NUM_SEG_CHANNELS` in `config.h`. Not swept as a hyperparameter without a rebuild. |
-| `num_semantic_classes` vs `seg_encoding_dim` | Both thread through the same config path (`ModelParams` in `arguments/__init__.py`), but serve different layers: `seg_encoding_dim` is Gaussian/rasterizer-side (compile-time), `num_semantic_classes` is decoder-side (runtime, dataset-dependent). |
+| `num_segmentation_classes` vs `seg_encoding_dim` | Both thread through the same config path (`ModelParams` in `arguments/__init__.py`), but serve different layers: `seg_encoding_dim` is Gaussian/rasterizer-side (compile-time), `num_segmentation_classes` is decoder-side (runtime, dataset-dependent). |
 | Decoder checkpoint lifecycle | Fully decoupled from `GaussianModel.capture()`/`restore()`. Own optimizer (`decoder_optimizer`), own save/load functions, own `.pth` file saved alongside the existing `chkpnt{iteration}.pth`. |
 | Decoder LR schedule | Flat at `decoder_lr_init` until a decay-start point, then exponential decay via `get_expon_lr_func`. Decay starts **before** `seg_warmup_iters` ends, so the decoder is already slowing down when confidence-gated splitting activates. Exact offset is an open tuning item (§6), not decided analytically. |
 | Seg encoding activation | None — raw passthrough. Composited via alpha-blending, same as color. The decoder applies the only nonlinearity. |
 | Shared-memory staging for seg in `renderCUDA` | **Read `seg_encoding` directly via `collected_id`; do not add a `collected_seg` shared array.** A 32-channel shared cache would cost ~32 KB/block (vs. ~7 KB for existing `collected_xy`/`collected_conic_opacity`/`collected_id` combined), risking a 4–5× shared-memory footprint increase and tanked occupancy. Direct global read is the same tradeoff already made implicitly for the existing color channels; make it explicit here given the larger channel count. |
 | `preprocessCUDA` staging buffer (`geomState.seg_features`) | **Removed (2026-09-13).** The staging was a pure copy with no per-Gaussian computation (~244 MiB redundant VRAM at P≈2M plus bandwidth in a bandwidth-bound kernel); `renderCUDA` (forward and backward) now reads the raw `seg_encoding` input tensor directly, same access pattern as the color feature pointer. `Rasterizer::backward` gained a `seg_encoding` parameter because the staged buffer was previously its only seg data source. Supersedes the original "keep for consistency" resolution. |
-| Background compositing term for segmentation | **None.** Color has `+ T * bg_color[ch]`; segmentation does not — unfilled space naturally decodes to near-zero encoding. This affects how `L_sem` must be masked at image boundaries / thin structures (open item, §6). |
+| Background compositing term for segmentation | **None.** Color has `+ T * bg_color[ch]`; segmentation does not — unfilled space naturally decodes to near-zero encoding. This affects how `L_seg` must be masked at image boundaries / thin structures (open item, §6). |
 
 ---
 
@@ -36,9 +36,9 @@ dL_dalpha += (c - accum_rec[ch]) * dL_dchannel;       // color's contribution
 dL_dalpha += (s - accum_rec_seg[ch]) * dL_dseg_ch;    // segmentation's contribution — MUST be summed into the same scalar
 ```
 
-If segmentation's contribution to `dL_dalpha` is dropped (e.g. only `dL_dseg_encoding` is computed, without folding into `dL_dalpha`), `L_sem` would still update the seg-encoding parameter correctly, but would **silently fail to drive position, scale, rotation, or opacity** — undermining the thesis claim that semantics actively drives geometry rather than sitting as a passive add-on. This does not throw an error; it fails silently and surfaces only as a confusing "semantic loss doesn't seem to affect density" symptom after a full training run.
+If segmentation's contribution to `dL_dalpha` is dropped (e.g. only `dL_dseg_encoding` is computed, without folding into `dL_dalpha`), `L_seg` would still update the seg-encoding parameter correctly, but would **silently fail to drive position, scale, rotation, or opacity** — undermining the thesis claim that segmentation actively drives geometry rather than sitting as a passive add-on. This does not throw an error; it fails silently and surfaces only as a confusing "segmentation loss doesn't seem to affect density" symptom after a full training run.
 
-**Required verification:** an isolated unit test — freeze color loss to zero, backprop only `L_sem` through a synthetic scene, assert `dL_dmean2D`/`dL_dopacity`/`dL_dconic2D` are nonzero while `dL_dsh`/`dL_dcolors` are exactly zero. See §5.
+**Required verification:** an isolated unit test — freeze color loss to zero, backprop only `L_seg` through a synthetic scene, assert `dL_dmean2D`/`dL_dopacity`/`dL_dconic2D` are nonzero while `dL_dsh`/`dL_dcolors` are exactly zero. See §5.
 
 ---
 
@@ -56,20 +56,20 @@ If segmentation's contribution to `dL_dalpha` is dropped (e.g. only `dL_dseg_enc
 - New `get_segmentation_encoding` property: raw passthrough, no activation.
 
 ### 3.2 `arguments/__init__.py`
-- `ModelParams`: add `seg_encoding_dim` (default 32) and `num_semantic_classes` (default 88 for Replica).
+- `ModelParams`: add `seg_encoding_dim` (default 32) and `num_segmentation_classes` (default 88 for Replica).
 - `OptimizationParams`: add `decoder_lr_init`, `decoder_lr_final`, `decoder_lr_decay_start`, `decoder_lr_decay_iters`, `seg_encoding_lr`, and `seg_warmup_iters`.
 
 ### 3.3 `scene/segmentation_decoder.py`
-- `SegmentationDecoder(nn.Module)`: a single `nn.Linear(seg_encoding_dim, num_semantic_classes)`. Own optimizer, own checkpoint save/load functions (`save_decoder_checkpoint` / `load_decoder_checkpoint`), separate `.pth` file.
+- `SegmentationDecoder(nn.Module)`: a single `nn.Linear(seg_encoding_dim, num_segmentation_classes)`. Own optimizer, own checkpoint save/load functions (`save_decoder_checkpoint` / `load_decoder_checkpoint`), separate `.pth` file.
 - **Fix the existing file** (see §4): it is currently broken — `torch.save`/`torch.load` are called but `torch` is never imported.
 
 ### 3.4 `train.py`
-- Instantiate `GaussianModel(dataset.sh_degree, dataset.seg_encoding_dim, ...)` and `SegmentationDecoder(dataset.seg_encoding_dim, dataset.num_semantic_classes)` from the same `dataset` config object.
+- Instantiate `GaussianModel(dataset.sh_degree, dataset.seg_encoding_dim, ...)` and `SegmentationDecoder(dataset.seg_encoding_dim, dataset.num_segmentation_classes)` from the same `dataset` config object.
 - Separate `decoder_optimizer = torch.optim.Adam(decoder.parameters(), ...)`.
 - Per-iteration: apply the decoder LR schedule (flat-then-decay); zero/step `decoder_optimizer` alongside `gaussians.optimizer`.
 - Resume path: load both `gaussians.restore(...)` and `load_decoder_checkpoint(...)`, matched by iteration number.
 - Warmup gating (`if iteration > opt.seg_warmup_iters: ...`) for confidence-based splitting — logic to be written; cleanly separable into `train.py` or a dedicated tracker class since the decoder is independent of `GaussianModel`.
-- Compute `L_sem` (cross-entropy on decoded `rendered_seg`) and the other loss terms per `docs/00-design_decisions.md`; decode `rendered_seg` with the decoder **after** rasterization, in the training loop (not inside the CUDA kernel), because `L_consist` compares decoded outputs across different camera poses of the same Gaussians.
+- Compute `L_seg` (cross-entropy on decoded `rendered_seg`) and the other loss terms per `docs/00-design_decisions.md`; decode `rendered_seg` with the decoder **after** rasterization, in the training loop (not inside the CUDA kernel), because `L_consist` compares decoded outputs across different camera poses of the same Gaussians.
 
 ### 3.5 CUDA rasterizer — `submodules/diff-gaussian-rasterization/`
 
@@ -123,7 +123,7 @@ A partial, **non-compiling** stub already exists in two files. An implementer mu
 
 1. **Build:** `pip install -e submodules/diff-gaussian-rasterization --break-system-packages -v` completes with a shared object produced (`find submodules/diff-gaussian-rasterization -name "*.so"`). A bare `256`-style output is inconclusive — use `-v` and confirm the `.so`.
 2. **Forward smoke test:** synthetic Gaussians → assert `rendered_seg.shape == (32, H, W)` and no NaNs.
-3. **`dL_dalpha` unit test (§2, mandatory):** freeze color loss to zero, backprop only `L_sem` through a synthetic scene; assert `dL_dmean2D`/`dL_dopacity`/`dL_dconic2D` are nonzero while `dL_dsh`/`dL_dcolors` are exactly zero.
+3. **`dL_dalpha` unit test (§2, mandatory):** freeze color loss to zero, backprop only `L_seg` through a synthetic scene; assert `dL_dmean2D`/`dL_dopacity`/`dL_dconic2D` are nonzero while `dL_dsh`/`dL_dcolors` are exactly zero.
 4. **Signature consistency:** `rasterize_points.h` declarations match `.cu` definitions (param order, types, return-tuple arity).
 5. **Buffer sizing:** `GeometryState::fromChunk` allocates exactly what it parses — it is the single sizing path in this codebase; the segmentation staging buffer no longer exists (removed 2026-09-13), so nothing segmentation-related is sized here anymore.
 6. **Resume parity:** `gaussians.restore(...)` + `load_decoder_checkpoint(...)` restore both models matched by iteration; decoder optimizer state restored.
@@ -136,5 +136,5 @@ Note: do not run the verification step without permission of the user.
 
 - **Decoder LR decay offset vs. `seg_warmup_iters`.** Intended to be tuned empirically via W&B (confidence-histogram spread vs. the warmup boundary vs. the LR curve), not decided analytically. Pick a concrete starting offset and document the choice.
 - **~~`geomState.seg_features` staging buffer.~~** Resolved 2026-09-13: removed; direct read of `seg_encoding` implemented in forward and backward `renderCUDA` (see §1 decision table). Original resolution ("keep for consistency, profile before changing") superseded.
-- **`L_sem` background masking.** Segmentation has no background compositing term, so `L_sem` must mask background pixels / thin structures. Decide the mask rule and document it.
+- **`L_seg` background masking.** Segmentation has no background compositing term, so `L_seg` must mask background pixels / thin structures. Decide the mask rule and document it.
 - **Confidence-gated 4-way split.** Deferred until the rendering path is verified correct (§5 criteria 2–3 pass). Implement in `densify_and_split` with discounted-confidence child inheritance; gating lives behind `seg_warmup_iters` in `train.py`.

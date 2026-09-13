@@ -76,11 +76,11 @@ def test_seg_only_backprop_drives_geometry():
 
     # Decode and build a seg-ONLY loss (color image is untouched by the loss
     # => its gradient contribution to dL_dalpha is exactly zero).
-    decoder = SegmentationDecoder(dataset.seg_encoding_dim, dataset.num_semantic_classes).cuda()
+    decoder = SegmentationDecoder(dataset.seg_encoding_dim, dataset.num_segmentation_classes).cuda()
     logits = decoder(rendered_seg.permute(1, 2, 0))                     # [H, W, C]
-    targets = torch.randint(0, dataset.num_semantic_classes, (H * W,), device="cuda")
-    L_sem = torch.nn.functional.cross_entropy(logits.reshape(-1, dataset.num_semantic_classes), targets)
-    L_sem.backward()
+    targets = torch.randint(0, dataset.num_segmentation_classes, (H * W,), device="cuda")
+    L_seg = torch.nn.functional.cross_entropy(logits.reshape(-1, dataset.num_segmentation_classes), targets)
+    L_seg.backward()
 
     # 1) Segmentation encoding receives gradient.
     seg_grad = gaussians._segmentation_encoding.grad
@@ -93,7 +93,7 @@ def test_seg_only_backprop_drives_geometry():
     for name, param in (("xyz", gaussians._xyz), ("opacity", gaussians._opacity), ("scaling", gaussians._scaling)):
         assert param.grad is not None, f"{name}.grad is None"
         assert param.grad.abs().sum().item() > 0.0, \
-            f"L_sem produced ZERO gradient on {name} — segmentation is not driving geometry (doc 01 §2 failure mode)"
+            f"L_seg produced ZERO gradient on {name} — segmentation is not driving geometry (doc 01 §2 failure mode)"
 
     # 3) Color parameters receive EXACTLY zero from the seg-only loss.
     for name, param in (("features_dc", gaussians._features_dc), ("features_rest", gaussians._features_rest)):

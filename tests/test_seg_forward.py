@@ -83,9 +83,9 @@ def test_forward_shape_and_finiteness():
     assert torch.isfinite(rendered_seg).all(), "non-finite values in rendered_seg"
 
     # Decoding sanity: decoder maps [H, W, 32] -> [H, W, num_classes]
-    decoder = SegmentationDecoder(dataset.seg_encoding_dim, dataset.num_semantic_classes).cuda()
+    decoder = SegmentationDecoder(dataset.seg_encoding_dim, dataset.num_segmentation_classes).cuda()
     logits = decoder(rendered_seg.permute(1, 2, 0))
-    assert logits.shape == (H, W, dataset.num_semantic_classes)
+    assert logits.shape == (H, W, dataset.num_segmentation_classes)
     print("PASS forward shape/finiteness/decode")
 
 
