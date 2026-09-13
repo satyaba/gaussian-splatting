@@ -102,6 +102,17 @@ If segmentation's contribution to `dL_dalpha` is dropped (e.g. only `dL_dseg_enc
 ### 3.7 `gaussian_renderer/__init__.py`
 - `render()`: pass `seg_encoding=pc.get_segmentation_encoding` into the rasterizer call; receive `rendered_seg` (`[32, H, W]`) as an additional return value. The decode step (`SegmentationDecoder(rendered_seg)`) happens **after** rasterization, in the training loop.
 
+### 3.8 Segmentation GT dataloader (implemented 2026-09-13 — Task 12)
+
+Per-view ground-truth class maps thread through `arguments → dataset_readers → camera_utils → cameras`:
+
+- `ModelParams.segmentation_path` (default `""` = off): folder of **uint8 class-id PNGs**, one per view, stems matching the RGB frames. Resolution rule: `<dir>/<split>/<stem>.png` preferred (split ∈ {train, test}), falling back to `<dir>/<stem>.png`; a missing file yields `""` → that camera carries `gt_segmentation=None` and `L_seg` is skipped for it.
+- Void pixels: class id **255** in the PNG → `-1` in the tensor (`ignore_index=-1` in `train.py`). Maps are resized with `cv2.INTER_NEAREST` (never blend class ids) and validated against `num_segmentation_classes` at load (taxonomy guard).
+- `Camera.gt_segmentation`: int64 `[H, W]` tensor on `data_device`, or `None`.
+- `OptimizationParams.lambda_seg` (default 1.0) weights `L_seg`; training logs an EMA "Seg Loss".
+- Colmap and Blender readers share the same wiring (`_segmentation_path_for` helper).
+- Dataset note: replica maps come from the Semantic-NeRF pre-rendered release (proper noun — see terminology note in docs/00); the loader itself only reads a user-supplied folder, no fetching.
+
 ---
 
 ## 4. Existing partial work in the repo (baseline state — verify before building)
@@ -137,4 +148,5 @@ Note: do not run the verification step without permission of the user.
 - **Decoder LR decay offset vs. `seg_warmup_iters`.** Intended to be tuned empirically via W&B (confidence-histogram spread vs. the warmup boundary vs. the LR curve), not decided analytically. Pick a concrete starting offset and document the choice.
 - **~~`geomState.seg_features` staging buffer.~~** Resolved 2026-09-13: removed; direct read of `seg_encoding` implemented in forward and backward `renderCUDA` (see §1 decision table). Original resolution ("keep for consistency, profile before changing") superseded.
 - **`L_seg` background masking.** Segmentation has no background compositing term, so `L_seg` must mask background pixels / thin structures. Decide the mask rule and document it.
+  - **Implemented (v1, 2026-09-13):** void rule = ignore pixels whose GT class id is 255 (remapped to `ignore_index=-1` at load time, `utils/camera_utils.py`). Boundary/thin-structure masking beyond void pixels remains open, deferred to `L_edge`.
 - **Confidence-gated 4-way split.** Deferred until the rendering path is verified correct (§5 criteria 2–3 pass). Implement in `densify_and_split` with discounted-confidence child inheritance; gating lives behind `seg_warmup_iters` in `train.py`.
