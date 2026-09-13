@@ -58,6 +58,7 @@ class ModelParams(ParamGroup):
         self.eval = False
         self.seg_encoding_dim = 32
         self.num_segmentation_classes = 88  # Replica fine-grained taxonomy
+        self.segmentation_path = ""  # folder of uint8 class-id PNGs (255=void); "" disables L_seg
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):
@@ -97,6 +98,7 @@ class OptimizationParams(ParamGroup):
         self.densify_grad_threshold = 0.0002
         self.depth_l1_weight_init = 1.0
         self.depth_l1_weight_final = 0.01
+        self.lambda_seg = 1.0  # weight on L_seg (segmentation cross-entropy)
         self.random_background = False
         self.optimizer_type = "default"
         self.seg_encoding_lr = 0.0025
