@@ -90,6 +90,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     viewpoint_indices = list(range(len(viewpoint_stack)))
     ema_loss_for_log = 0.0
     ema_Ll1depth_for_log = 0.0
+    ema_Ll1seg_for_log = 0.0
 
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
@@ -167,12 +168,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         rendered_seg = render_pkg["rendered_seg"]                       # [NUM_SEG_CHANNELS, H, W]
         seg_logits = decoder(rendered_seg.permute(1, 2, 0))             # [H, W, num_segmentation_classes]
         gt_segmentation = getattr(viewpoint_cam, "gt_segmentation", None)
+        Ll1seg = 0.0
         if gt_segmentation is not None:
-            L_seg = torch.nn.functional.cross_entropy(
+            L_seg = opt.lambda_seg * torch.nn.functional.cross_entropy(
                 seg_logits.reshape(-1, dataset.num_segmentation_classes),
                 gt_segmentation.cuda().reshape(-1).long(),
-                ignore_index=-1)  # background/void mask rule: OPEN ITEM (doc 01 §6)
+                ignore_index=-1)  # void rule v1: ignore pixels labeled 255 (doc 01 §6)
             loss = loss + L_seg
+            Ll1seg = L_seg.item()
         for param_group in decoder_optimizer.param_groups:
             param_group['lr'] = get_decoder_lr(iteration)
 
@@ -184,9 +187,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
             ema_Ll1depth_for_log = 0.4 * Ll1depth + 0.6 * ema_Ll1depth_for_log
+            ema_Ll1seg_for_log = 0.4 * Ll1seg + 0.6 * ema_Ll1seg_for_log
 
             if iteration % 10 == 0:
-                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "Depth Loss": f"{ema_Ll1depth_for_log:.{7}f}"})
+                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "Depth Loss": f"{ema_Ll1depth_for_log:.{7}f}", "Seg Loss": f"{ema_Ll1seg_for_log:.{7}f}"})
                 progress_bar.update(10)
             if iteration == opt.iterations:
                 progress_bar.close()

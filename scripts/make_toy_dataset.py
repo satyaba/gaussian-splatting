@@ -8,11 +8,12 @@
 #   out/transforms_train.json, out/transforms_test.json
 #   out/train/r_XX.png   (RGB)
 #   out/test/r_XX.png    (RGB)
-#   out/train_seg/r_XX.png  (uint8 class ids: 0=wall,1=red blob,2=green blob, 255=void/ignore)
-#   out/train_depth/r_XX.png (float32 inverse depth, 0 = invalid)
+#   out/sem/train/r_XX.png  (uint8 class ids: 0=wall,1=red blob,2=green blob, 255=void/ignore)
+#   out/sem/test/r_XX.png   (same, test views — wiring matches the Task 12 loader rule)
+#   out/train_depth/r_XX.png (float32 inverse depth, 0 = invalid; not wired into loader)
 #
-# NOTE: the segmentation/depth folders are NOT wired into the loader yet (Task 12
-# deferred); they are written for future use and for manual inspection.
+# The seg maps follow the --segmentation_path folder convention: point
+# --segmentation_path <out>/sem and the loader resolves sem/train/ or sem/test/.
 import json
 import os
 import sys
@@ -79,7 +80,7 @@ def main():
     args = ap.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
-    for sub in ("train", "test", "train_seg", "train_depth"):
+    for sub in ("train", "test", "sem/train", "sem/test", "train_depth", "test_depth"):
         os.makedirs(os.path.join(args.out, sub), exist_ok=True)
 
     def cam_entry(azimuth, height, file_path):
@@ -96,16 +97,18 @@ def main():
         img, seg, dep = render_frame(az, h, args.size, seed=i)
         stem = os.path.join(args.out, name)
         Image.fromarray((img * 255).astype(np.uint8)).save(stem + ".png")
-        cv2.imwrite(os.path.join(args.out, "train_seg", f"r_{i:02d}.png"), seg)
+        cv2.imwrite(os.path.join(args.out, "sem", "train", f"r_{i:02d}.png"), seg)
         cv2.imwrite(os.path.join(args.out, "train_depth", f"r_{i:02d}.png"), dep)
 
     for i in range(2):
         az = 2.0 * np.pi * (i + 0.5) / 4.0
         name = f"test/r_{i:02d}"
         test_frames.append(cam_entry(az, 0.0, name))
-        img, _, _ = render_frame(az, 0.0, args.size, seed=100 + i)
+        img, seg, dep = render_frame(az, 0.0, args.size, seed=100 + i)
         Image.fromarray((img * 255).astype(np.uint8)).save(
             os.path.join(args.out, name + ".png"))
+        cv2.imwrite(os.path.join(args.out, "sem", "test", f"r_{i:02d}.png"), seg)
+        cv2.imwrite(os.path.join(args.out, "test_depth", f"r_{i:02d}.png"), dep)
 
     transforms = {"camera_angle_x": FOVX}
     with open(os.path.join(args.out, "transforms_train.json"), "w") as f:
