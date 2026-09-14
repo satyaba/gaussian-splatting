@@ -114,6 +114,50 @@ conda env create --file environment.yml --prefix <Drive>/<env_path>/gaussian_spl
 conda activate <Drive>/<env_path>/gaussian_splatting
 ```
 
+#### SGDense-3DGS environment (read this before installing)
+
+The `environment.yml` in this repository is inherited **unchanged from upstream** and has
+**not been tested with SGDense-3DGS**. The pinned PyTorch 1.12.1 cannot run this fork:
+every checkpoint load uses the `weights_only` argument of `torch.load`, which requires
+**PyTorch ≥ 1.13**.
+
+SGDense-3DGS has been built and verified on the following stack (Colab GPU, September 2026):
+
+| component | proven version |
+|---|---|
+| Python | 3.13 |
+| PyTorch | 2.11.0 + cu128 (Colab-preinstalled) |
+| CUDA runtime | 12.8 |
+| host compiler | gcc 13.3 |
+
+On Colab, PyTorch is preinstalled — no action needed. On other systems, install a PyTorch
+build whose CUDA runtime matches your system CUDA (see pytorch.org).
+
+Steps that worked end-to-end on that stack (run from the repository root):
+
+```shell
+# 0. clone with the fork's submodules (rasterizer seg-encoding branch, simple-knn cuda12)
+git clone --recurse-submodules https://github.com/satyaba/gaussian-splatting.git
+cd gaussian-splatting
+
+# 1. CUDA extensions — non-editable install with --no-build-isolation.
+#    (PEP 517 build isolation cannot see torch, which setup.py imports.)
+#    Re-run after any edit to the rasterizer's CUDA sources.
+pip install ./submodules/diff-gaussian-rasterization --no-build-isolation
+pip install ./submodules/simple-knn --no-build-isolation
+
+# 2. verify the extensions import
+python -c "import diff_gaussian_rasterization; print('installed at:', diff_gaussian_rasterization.__file__)"
+python -c "import torch; from simple_knn._C import distCUDA2; print('simple_knn OK')"
+
+# 3. runtime dependencies (as inherited from upstream environment.yml)
+pip install plyfile opencv-python tqdm joblib
+```
+
+Note: the third submodule, `fused-ssim`, is **optional** — `train.py` falls back to the
+plain D-SSIM loss when it is absent, and the verification runs referenced above were
+performed without it.
+
 #### Modifications
 
 If you can afford the disk space, we recommend using our environment files for setting up a training environment identical to ours. If you want to make modifications, please note that major version changes might affect the results of our method. However, our (limited) experiments suggest that the codebase works just fine inside a more up-to-date environment (Python 3.8, PyTorch 2.0.0, CUDA 12). Make sure to create an environment where PyTorch and its CUDA runtime version match and the installed CUDA SDK has no major version difference with PyTorch's CUDA version.
