@@ -3,7 +3,7 @@
 # GRAPHDECO research group, https://team.inria.fr/graphdeco
 # All rights reserved.
 #
-# This software is free for non-commercial, research and evaluation use 
+# This software is free for non-commercial, research and evaluation use
 # under the terms of the LICENSE.md file.
 #
 # For inquiries contact  george.drettakis@inria.fr
@@ -35,7 +35,7 @@ class GaussianModel:
             actual_covariance = L @ L.transpose(1, 2)
             symm = strip_symmetric(actual_covariance)
             return symm
-        
+
         self.scaling_activation = torch.exp
         self.scaling_inverse_activation = torch.log
 
@@ -50,7 +50,7 @@ class GaussianModel:
     def __init__(self, sh_degree, optimizer_type="default", seg_encoding_dim=32):
         self.active_sh_degree = 0
         self.optimizer_type = optimizer_type
-        self.max_sh_degree = sh_degree  
+        self.max_sh_degree = sh_degree
         self.seg_encoding_dim = seg_encoding_dim
         self._xyz = torch.empty(0)
         self._features_dc = torch.empty(0)
@@ -59,6 +59,11 @@ class GaussianModel:
         self._rotation = torch.empty(0)
         self._opacity = torch.empty(0)
         self._segmentation_encoding = torch.empty(0)
+        self.seg_l1 = torch.empty(0, dtype=torch.long)
+        self.seg_n1 = torch.empty(0, dtype=torch.int32)
+        self.seg_l2 = torch.empty(0, dtype=torch.long)
+        self.seg_n2 = torch.empty(0, dtype=torch.int32)
+        self.seg_n_tot = torch.empty(0, dtype=torch.int32)
         self.max_radii2D = torch.empty(0)
         self.xyz_gradient_accum = torch.empty(0)
         self.denom = torch.empty(0)
@@ -80,65 +85,80 @@ class GaussianModel:
             self.max_radii2D,
             self.xyz_gradient_accum,
             self.denom,
+            self.seg_l1,
+            self.seg_n1,
+            self.seg_l2,
+            self.seg_n2,
+            self.seg_n_tot,
             self.optimizer.state_dict(),
             self.spatial_lr_scale,
         )
-    
+
     def restore(self, model_args, training_args):
-        (self.active_sh_degree, 
-        self._xyz, 
-        self._features_dc, 
+        (self.active_sh_degree,
+        self._xyz,
+        self._features_dc,
         self._features_rest,
-        self._scaling, 
-        self._rotation, 
+        self._scaling,
+        self._rotation,
         self._opacity,
         self._segmentation_encoding,
-        self.max_radii2D, 
-        xyz_gradient_accum, 
+        self.max_radii2D,
+        xyz_gradient_accum,
         denom,
-        opt_dict, 
+        seg_l1,
+        seg_n1,
+        seg_l2,
+        seg_n2,
+        seg_n_tot,
+        opt_dict,
         self.spatial_lr_scale) = model_args
         self.training_setup(training_args)
         self.xyz_gradient_accum = xyz_gradient_accum
         self.denom = denom
+        self.seg_l1 = seg_l1
+        self.seg_n1 = seg_n1
+        self.seg_l2 = seg_l2
+        self.seg_n2 = seg_n2
+        self.seg_n_tot = seg_n_tot
         self.optimizer.load_state_dict(opt_dict)
 
     @property
     def get_scaling(self):
         return self.scaling_activation(self._scaling)
-    
+
     @property
     def get_rotation(self):
         return self.rotation_activation(self._rotation)
-    
+
     @property
     def get_xyz(self):
         return self._xyz
-    
+
     @property
     def get_features(self):
         features_dc = self._features_dc
         features_rest = self._features_rest
         return torch.cat((features_dc, features_rest), dim=1)
-    
+
     @property
     def get_features_dc(self):
         return self._features_dc
-    
+
     @property
     def get_features_rest(self):
         return self._features_rest
-    
+
     @property
     def get_opacity(self):
         return self.opacity_activation(self._opacity)
-    
+
     @property
     def get_segmentation_encoding(self):
         # Raw passthrough, no activation (locked decision) — the decoder
         # applies the only nonlinearity.
         return self._segmentation_encoding
-    
+
     @property
     def get_exposure(self):
         return self._exposure
@@ -148,7 +168,7 @@ class GaussianModel:
             return self._exposure[self.exposure_mapping[image_name]]
         else:
             return self.pretrained_exposures[image_name]
-    
+
     def get_covariance(self, scaling_modifier = 1):
         return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation)
 
@@ -191,6 +211,12 @@ class GaussianModel:
         self.percent_dense = training_args.percent_dense
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+        # Segmentation consistency counters (integer counts; labels long, -1 = empty slot).
+        self.seg_l1 = torch.full((self.get_xyz.shape[0], 1), -1, dtype=torch.long, device="cuda")
+        self.seg_n1 = torch.zeros((self.get_xyz.shape[0], 1), dtype=torch.int32, device="cuda")
+        self.seg_l2 = torch.full((self.get_xyz.shape[0], 1), -1, dtype=torch.long, device="cuda")
+        self.seg_n2 = torch.zeros((self.get_xyz.shape[0], 1), dtype=torch.int32, device="cuda")
+        self.seg_n_tot = torch.zeros((self.get_xyz.shape[0], 1), dtype=torch.int32, device="cuda")
 
         l = [
             {'params': [self._xyz], 'lr': training_args.position_lr_init * self.spatial_lr_scale, "name": "xyz"},
@@ -217,7 +243,7 @@ class GaussianModel:
                                                     lr_final=training_args.position_lr_final*self.spatial_lr_scale,
                                                     lr_delay_mult=training_args.position_lr_delay_mult,
                                                     max_steps=training_args.position_lr_max_steps)
-        
+
         self.exposure_scheduler_args = get_expon_lr_func(training_args.exposure_lr_init, training_args.exposure_lr_final,
                                                         lr_delay_steps=training_args.exposure_lr_delay_steps,
                                                         lr_delay_mult=training_args.exposure_lr_delay_mult,
@@ -393,6 +419,13 @@ class GaussianModel:
         self.max_radii2D = self.max_radii2D[valid_points_mask]
         self.tmp_radii = self.tmp_radii[valid_points_mask]
 
+        self.seg_l1 = self.seg_l1[valid_points_mask]
+        self.seg_n1 = self.seg_n1[valid_points_mask]
+        self.seg_l2 = self.seg_l2[valid_points_mask]
+        self.seg_n2 = self.seg_n2[valid_points_mask]
+        self.seg_n_tot = self.seg_n_tot[valid_points_mask]
+
+
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
@@ -438,6 +471,13 @@ class GaussianModel:
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
+        # Fresh observation window: same dtypes as training_setup (labels long, -1 slot).
+        self.seg_l1 = torch.full((self.get_xyz.shape[0], 1), -1, dtype=torch.long, device="cuda")
+        self.seg_n1 = torch.zeros((self.get_xyz.shape[0], 1), dtype=torch.int32, device="cuda")
+        self.seg_l2 = torch.full((self.get_xyz.shape[0], 1), -1, dtype=torch.long, device="cuda")
+        self.seg_n2 = torch.zeros((self.get_xyz.shape[0], 1), dtype=torch.int32, device="cuda")
+        self.seg_n_tot = torch.zeros((self.get_xyz.shape[0], 1), dtype=torch.int32, device="cuda")
+
     def densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
         n_init_points = self.get_xyz.shape[0]
         # Extract points that satisfy the gradient condition
@@ -470,7 +510,7 @@ class GaussianModel:
         selected_pts_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
         selected_pts_mask = torch.logical_and(selected_pts_mask,
                                               torch.max(self.get_scaling, dim=1).values <= self.percent_dense*scene_extent)
-        
+
         new_xyz = self._xyz[selected_pts_mask]
         new_features_dc = self._features_dc[selected_pts_mask]
         new_features_rest = self._features_rest[selected_pts_mask]
