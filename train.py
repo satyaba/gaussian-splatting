@@ -48,7 +48,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
-    gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type, seg_encoding_dim=dataset.seg_encoding_dim)
+    gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type,
+                              seg_encoding_dim=dataset.seg_encoding_dim,
+                              num_segmentation_classes=dataset.num_segmentation_classes)
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
     if checkpoint:
@@ -209,6 +211,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
 
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
+                    # doc 03 §4.4: read M BEFORE any lifecycle call — densification
+                    # mutates population and M in lockstep, so this must come first.
+                    consistency, structure, disagree, S = gaussians.seg_hist_readout()
+                    if tb_writer:
+                        tb_writer.add_histogram("seg/consistency", consistency, iteration)
+                        tb_writer.add_histogram("seg/structure", structure, iteration)
+                        tb_writer.add_histogram("seg/disagree", disagree, iteration)
+                        tb_writer.add_histogram("seg/evidence_S", S, iteration)
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
                     gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, radii)
 

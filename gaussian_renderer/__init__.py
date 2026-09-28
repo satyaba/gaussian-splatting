@@ -44,9 +44,17 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     # Per-Gaussian segmentation vote buffer [P, C], filled in-kernel as
     # sum(alpha * T) at [gaussian_id, gt_label]; read back via render_pkg["seg_votes"].
     # Empty (0 elements) when segmentation is off, which disables voting.
-    if num_segmentation_classes > 0 and gt_segmentation.numel() > 0:
-        vote_buffer = torch.zeros((pc.get_xyz.shape[0], num_segmentation_classes),
-                                  dtype=torch.float32, device="cuda")
+    # doc 03 §3.4: persist M on the model. Decay in place, then hand the SAME
+    # tensor to the kernel so its atomicAdd lands directly in pc.seg_hist. Decay AND
+    # the pass-through stay INSIDE this guard, so validation/GUI renders
+    # (num_segmentation_classes = -1) never touch M (correctness, doc 03 §4.4).
+    # Decay-on-observation (doc 03 §3.3/§6.2): this mul_ is decay-ALL; the rows it
+    # wrongly decayed are restored below, once the rasterizer reports which
+    # Gaussians were visible. Net effect: observed rows = decay-then-add (§3.1);
+    # unobserved rows keep their evidence (no erosion for being out of frustum).
+    if num_segmentation_classes > 0 and gt_segmentation.numel() > 0 and pc.seg_hist.numel() > 0:
+        pc.seg_hist.mul_(pc.seg_hist_decay)
+        vote_buffer = pc.seg_hist
     else:
         vote_buffer = torch.empty(0, dtype=torch.float32, device="cuda")
 
@@ -130,6 +138,15 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             scales = scales,
             rotations = rotations,
             cov3D_precomp = cov3D_precomp)
+
+    # Decay-on-observation (doc 03 §3.3/§6.2): the mul_ above decayed EVERY row,
+    # but only Gaussians the rasterizer actually rendered cast a vote. radii == 0
+    # is the culled / zero-radius set -- exactly the rows that received no
+    # atomicAdd -- so undo the decay there (x / beta ~= x; ~1 ulp/step, not
+    # bit-exact). Must run here: the visible set only exists after the render.
+    if vote_buffer.numel() > 0:
+        unobs = (radii == 0).nonzero(as_tuple=False).squeeze(1)
+        vote_buffer[unobs] = vote_buffer[unobs] * (1.0 / pc.seg_hist_decay)
 
     # Apply exposure to rendered image (training only)
     if use_trained_exp:

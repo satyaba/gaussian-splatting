@@ -47,11 +47,14 @@ class GaussianModel:
         self.rotation_activation = torch.nn.functional.normalize
 
 
-    def __init__(self, sh_degree, optimizer_type="default", seg_encoding_dim=32):
+    def __init__(self, sh_degree, optimizer_type="default", seg_encoding_dim=32, num_segmentation_classes=0):
         self.active_sh_degree = 0
         self.optimizer_type = optimizer_type
         self.max_sh_degree = sh_degree
         self.seg_encoding_dim = seg_encoding_dim
+        self.num_segmentation_classes = num_segmentation_classes
+        self.seg_hist_decay = 1.0                  # beta; overwritten in training_setup
+        self.seg_hist_inherit_discount = 1.0       # c; overwritten in training_setup
         self._xyz = torch.empty(0)
         self._features_dc = torch.empty(0)
         self._features_rest = torch.empty(0)
@@ -64,6 +67,7 @@ class GaussianModel:
         self.seg_l2 = torch.empty(0, dtype=torch.long)
         self.seg_n2 = torch.empty(0, dtype=torch.int32)
         self.seg_n_tot = torch.empty(0, dtype=torch.int32)
+        self.seg_hist = torch.empty(0)  # [N, C] fp32 persisted mass histogram (doc 03)
         self.max_radii2D = torch.empty(0)
         self.xyz_gradient_accum = torch.empty(0)
         self.denom = torch.empty(0)
@@ -217,6 +221,11 @@ class GaussianModel:
         self.seg_l2 = torch.full((self.get_xyz.shape[0], 1), -1, dtype=torch.long, device="cuda")
         self.seg_n2 = torch.zeros((self.get_xyz.shape[0], 1), dtype=torch.int32, device="cuda")
         self.seg_n_tot = torch.zeros((self.get_xyz.shape[0], 1), dtype=torch.int32, device="cuda")
+        # Persisted [N, C] mass histogram (doc 03 §4.3); decay/inherit knobs live on the model.
+        self.seg_hist_decay = training_args.seg_hist_decay
+        self.seg_hist_inherit_discount = training_args.seg_hist_inherit_discount
+        self.seg_hist = torch.zeros((self.get_xyz.shape[0], self.num_segmentation_classes),
+                                    dtype=torch.float32, device="cuda")
 
         l = [
             {'params': [self._xyz], 'lr': training_args.position_lr_init * self.spatial_lr_scale, "name": "xyz"},
@@ -424,6 +433,7 @@ class GaussianModel:
         self.seg_l2 = self.seg_l2[valid_points_mask]
         self.seg_n2 = self.seg_n2[valid_points_mask]
         self.seg_n_tot = self.seg_n_tot[valid_points_mask]
+        self.seg_hist = self.seg_hist[valid_points_mask]
 
 
     def cat_tensors_to_optimizer(self, tensors_dict):
@@ -448,7 +458,7 @@ class GaussianModel:
 
         return optimizable_tensors
 
-    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_seg_encoding, new_tmp_radii):
+    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_seg_encoding, new_tmp_radii, new_seg_hist=None):
         d = {"xyz": new_xyz,
         "f_dc": new_features_dc,
         "f_rest": new_features_rest,
@@ -478,6 +488,11 @@ class GaussianModel:
         self.seg_n2 = torch.zeros((self.get_xyz.shape[0], 1), dtype=torch.int32, device="cuda")
         self.seg_n_tot = torch.zeros((self.get_xyz.shape[0], 1), dtype=torch.int32, device="cuda")
 
+        # doc 03 §6.1: children INHERIT identity (c * M_parent). This is an APPEND,
+        # not a zero-reset like the counters above — the histogram is persistent.
+        if new_seg_hist is not None:
+            self.seg_hist = torch.cat((self.seg_hist, new_seg_hist), dim=0)
+
     def densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
         n_init_points = self.get_xyz.shape[0]
         # Extract points that satisfy the gradient condition
@@ -497,10 +512,11 @@ class GaussianModel:
         new_features_dc = self._features_dc[selected_pts_mask].repeat(N,1,1)
         new_features_rest = self._features_rest[selected_pts_mask].repeat(N,1,1)
         new_seg_encoding = self._segmentation_encoding[selected_pts_mask].repeat(N,1)
+        new_seg_hist = self.seg_hist[selected_pts_mask].repeat(N,1) * self.seg_hist_inherit_discount
         new_opacity = self._opacity[selected_pts_mask].repeat(N,1)
         new_tmp_radii = self.tmp_radii[selected_pts_mask].repeat(N)
 
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_seg_encoding, new_tmp_radii)
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_seg_encoding, new_tmp_radii, new_seg_hist)
 
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
         self.prune_points(prune_filter)
@@ -515,13 +531,14 @@ class GaussianModel:
         new_features_dc = self._features_dc[selected_pts_mask]
         new_features_rest = self._features_rest[selected_pts_mask]
         new_seg_encoding = self._segmentation_encoding[selected_pts_mask]
+        new_seg_hist = self.seg_hist[selected_pts_mask] * self.seg_hist_inherit_discount
         new_opacities = self._opacity[selected_pts_mask]
         new_scaling = self._scaling[selected_pts_mask]
         new_rotation = self._rotation[selected_pts_mask]
 
         new_tmp_radii = self.tmp_radii[selected_pts_mask]
 
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_seg_encoding, new_tmp_radii)
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_seg_encoding, new_tmp_radii, new_seg_hist)
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, radii):
         grads = self.xyz_gradient_accum / self.denom
@@ -541,6 +558,30 @@ class GaussianModel:
         self.tmp_radii = None
 
         torch.cuda.empty_cache()
+
+    @torch.no_grad()
+    def seg_hist_readout(self, eps=1e-8):
+        """Read-outs from the persisted mass histogram M (doc 03 §3.2).
+
+        Returns (consistency, structure, disagree, S), each [N]:
+          consistency = max_c P[g, c]     (replaces the old top1/tot proxy)
+          structure   = P_(1) + P_(2)     (boundary-ness)
+          disagree    = 1 - P_(1)
+          S           = sum_c M[g, c]     (evidence = mass, NOT count)
+        Rows with S == 0 give P == 0, so their 'disagree' looks maximal — gate
+        them out with S (`S > seg_hist_min_evidence`), never with disagree.
+        """
+        if self.seg_hist.numel() == 0:
+            z = torch.zeros((self.get_xyz.shape[0],), device="cuda")
+            return z, z, z, z
+        S = self.seg_hist.sum(dim=1)
+        P = self.seg_hist / S.clamp_min(eps).unsqueeze(1)
+        k = min(2, P.shape[1])
+        top2 = torch.topk(P, k=k, dim=1).values
+        consistency = top2[:, 0]
+        structure = top2[:, 0] + top2[:, 1] if k == 2 else top2[:, 0]
+        disagree = 1.0 - top2[:, 0]
+        return consistency, structure, disagree, S
 
     def add_densification_stats(self, viewspace_point_tensor, update_filter):
         self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)

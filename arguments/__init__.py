@@ -57,7 +57,7 @@ class ModelParams(ParamGroup):
         self.data_device = "cuda"
         self.eval = False
         self.seg_encoding_dim = 32
-        self.num_segmentation_classes = 88  # Replica fine-grained taxonomy
+        self.num_segmentation_classes = 100  # office_0 ids reach 98 (doc 03 §6.4 — safety-critical)
         self.segmentation_path = ""  # folder of uint8 class-id PNGs (255=void); "" disables L_seg
         super().__init__(parser, "Loading Parameters", sentinel)
 
@@ -107,6 +107,10 @@ class OptimizationParams(ParamGroup):
         self.decoder_lr_final = 0.0001
         self.decoder_lr_decay_start = 7_000   # < seg_warmup_iters: decay begins before warmup ends (open tuning item)
         self.decoder_lr_decay_iters = 15_000  # decay spans [decay_start, decay_start + decay_iters]
+        # Persisted per-Gaussian segmentation mass histogram (doc 03)
+        self.seg_hist_decay = 0.99             # beta: exponential decay per iteration (§6.3)
+        self.seg_hist_min_evidence = 1.0       # S gate, mass not count (§6.5)
+        self.seg_hist_inherit_discount = 0.5   # c: M_child = c * M_parent at densify (§6.1)
         super().__init__(parser, "Optimization Parameters")
 
 def get_combined_args(parser : ArgumentParser):
