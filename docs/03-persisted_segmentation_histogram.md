@@ -12,8 +12,8 @@ It is **not** a record of completed work. It is a design proposal with a frozen 
 
 | Phase | What it is | Status in this doc | Compute risk |
 |---|---|---|---|
-| **Starting design** | Persistent `[N, C]` fp32 mass histogram; per-iteration exponential decay; read `argmax` + row-sum. | Frozen (§4). **Build this first.** | low (rides the existing forward pass) |
-| **Optimization stage** | Measurement-gated cost/robustness improvements (fused read-out, visible-set decay, bf16, compaction, kernel-level atomics, adaptive β). | Deferred roadmap (§5). **Nothing implemented until Stage 1 measurement justifies it.** | varies |
+| **Starting design** | Persistent `[N, C]` fp32 mass histogram; **decay-on-observation** (decay-all pass + restore of unrendered rows); read `argmax` + row-sum. | Frozen (§4). **Build this first.** | low (rides the existing forward pass) |
+| **Optimization stage** | Measurement-gated cost/robustness improvements (fused read-out, bf16, compaction, kernel-level atomics, adaptive β, staleness gating). | Deferred roadmap (§5). **Nothing implemented until Stage 1 measurement justifies it.** | varies |
 
 No `git commit` until explicitly authorized (parent repo + `diff-gaussian-rasterization` submodule would be two separate commits).
 
@@ -46,7 +46,7 @@ A persisted, decayed, full-row histogram removes all three: it is exact per clas
 | `w = α·T` | The vote weight — the Gaussian's actual contribution at that pixel. |
 | `B_t[g,c]` | This iteration's per-class mass: `Σ_{p : label(p)=c} w` over pixels `p` the Gaussian covers in view `t`. |
 | `s_t[g]` | Row total for the iteration: `Σ_c B_t[g,c]` = the Gaussian's total compositing mass in view `t`. |
-| `β` | Decay factor, just under 1 (e.g. 0.99). Old evidence fades geometrically; effective memory ≈ `1/(1−β)` iterations. |
+| `β` | Decay factor, just under 1 (e.g. 0.99). Old evidence fades geometrically **per observation** (§3.3): a row observed every iteration has effective memory ≈ `1/(1−β)` observations; an unobserved row does not decay at all. |
 | `S[g]` | Evidence: `Σ_c M[g,c]` (row sum) — how much mass accumulated lately. |
 | `P[g,c]` | Read-out distribution: `M[g,c] / S[g]` (row-normalized). `c*` = `argmax_c`. |
 
@@ -62,6 +62,8 @@ The histogram is **never zeroed between iterations**. Each iteration, decay firs
 M ← β · M                     # decay the accumulated evidence (one pass)
 M[g, label(p)] += α_g(p)·T_g(p)   # for every contributing pixel, in-kernel (atomicAdd)
 ```
+
+Step 1 is a *decay-all* pass; rows the rasterizer does not render are restored afterwards (§3.3), so every equation below holds per **observed** row — an unobserved row simply carries its previous value unchanged.
 
 Written out per Gaussian and class, over past iterations `k` with weights `β^{t−k}`:
 
@@ -87,14 +89,28 @@ So `M` is a **geometrically-decayed pooled mass histogram** — the α·T eviden
 
 All read-outs lie in `[0,1]` **by construction** (`P` sums to 1), so the old `n1 + n2 ≤ tot` invariant hazard disappears.
 
-### 3.3 Decay policy
+### 3.3 Decay policy — decay-on-observation (adopted)
 
-- **Decay-all** (`M ← βM` over all `N` rows) is simplest. It cannot move `P` (the ratio is scale-invariant) — it only shrinks `S`. So decay policy *cannot corrupt the class estimate*; it governs only evidence lifetime.
-- **Decay-on-observation** (decay only the current view's visible set, known from culling) avoids penalizing a Gaussian merely for being outside the frustum this step ("view-sampling luck"). The streaming proposal raised this correctly; it is worth adopting, at the cost of one indexing step. **Open — see §6.2.** Either way, a Gaussian never observed has `S → 0`, which is exactly the "don't trust this" signal.
+**Adopted: decay-on-observation.** Each iteration the decay is a *decay-all* pass (`M ← βM` over all `N` rows), then the rows the rasterizer did **not** render are restored. The observed set comes from the rasterizer itself — `radii == 0` is exactly the frustum-culled / zero-radius set, i.e. the rows that received no `atomicAdd` — so no snapshot or diff is needed:
+
+```
+M ← β · M                            # decay-all, in place, before the kernel
+<render: kernel atomicAdds B_t into the rendered rows>
+M[radii == 0] ← M[radii == 0] / β    # undo on the rows that received no vote
+```
+
+Net effect per row: rendered → `β·M_{t−1} + B_t` (decay-then-add, §3.1); culled → `M_{t−1}` (evidence held). Not bit-exact for the restored rows (`(x·β)/β ≈ x` to ~1 ulp/step; a permanently-absent row drifts ≈ `√iters·ulp`, negligible), and a row that is in-frustum but casts only underflowing weight is treated as observed and decayed (harmless).
+
+**Consequences.**
+- Decay cannot move `P` (the ratio is scale-invariant) — it only shrinks `S`. So the policy *cannot corrupt the class estimate*; it governs only evidence lifetime.
+- A Gaussian **never** rendered has `M = 0` ⇒ `S = 0` — the "don't trust this" signal. But a Gaussian that *was* observed and later leaves the frustum **keeps its `S` indefinitely** (it is never decayed again) — intended, so eligibility is not lost to view-sampling luck. The §6.5 mass gate will therefore not retire a long-absent Gaussian on its own; the candidate handling under consideration is the **stale-flag gate** (§6.2, §5 5e) — an alternative to a wall-clock decay — since it keeps the evidence (instant re-warm, observation clock preserved) while a recency clause gates eligibility.
+- **"Observed" is a geometry proxy (`radii > 0`), not an evidence proxy — ACCEPTED.** A Gaussian that is in-frustum but fully occluded has `radii > 0`, so it is decayed while casting ≈0 mass: its `S` bleeds to zero and it ages out without having been informed or tested. This is a known, deliberately accepted looseness — harmless for the maturity gate (an evidence-less Gaussian *should* abstain) and it usefully retires occluded floaters. A strict evidence-flag (the kernel sets a per-row flag on its first `atomicAdd`) is the fix if §7.7 shows occluded Gaussians aging out wrongly — kernel-body work, deferred.
 
 ### 3.4 Live-in-the-kernel write
 
-Because `M` persists, the kernel can `atomicAdd` **directly into `M`** after the decay pass — the old zero-seeded scratch buffer (`gaussian_renderer/__init__.py:48`) is **removed rather than duplicated**. The existing `vote_buffer` plumbing (`float*` through the rasterizer chain) is unchanged; only the Python side changes from `torch.zeros((P, C))` to a persistent `M.mul_(β)`.
+Because `M` persists, the kernel can `atomicAdd` **directly into `M`** after the decay pass — the old zero-seeded scratch buffer (`gaussian_renderer/__init__.py:48`) is **removed rather than duplicated**. The existing `vote_buffer` plumbing (`float*` through the rasterizer chain) is unchanged; only the Python side changes: `torch.zeros((P, C))` becomes a persistent `M.mul_(β)` (decay-all) followed, after the render call, by the restore of the unrendered rows (§3.3).
+
+**There is exactly one `[N, C]` tensor in this design.** `M` is simultaneously the accumulator and the per-iteration write target; the `vote_buffer` of the current code *becomes* `M` (its lifetime changes from per-render to persistent, its allocation count does not). VRAM therefore does **not** double — one `[N, C]` (~763 MB at 2M), not two (~1.5 GB). Doubling would only occur if a separate zero-seeded scratch were kept *alongside* a distinct accumulator, which this design explicitly avoids.
 
 ### 3.5 Cost (measured; 5090, ~1.2 TB/s effective)
 
@@ -104,7 +120,7 @@ Because `M` persists, the kernel can `atomicAdd` **directly into `M`** after the
 | 5 M | 1.91 GB | 3.33 ms | 1.67 ms |
 | 10 M | 3.82 GB | 6.67 ms | 3.33 ms |
 
-≈2 ms/iter at 2M (**≈5–10 % of a render step**), and `M` is ≈36 % of the per-Gaussian training state (~1.07 KB/Gaussian). Comfortable on a 32 GB 5090 up to ~10–20 M Gaussians; tight on Colab beyond ~5 M. Peak memory is **identical** to a streaming design (§1.2).
+≈2 ms/iter at 2M (**≈5–10 % of a render step**), and `M` is ≈36 % of the per-Gaussian training state (~1.07 KB/Gaussian). Comfortable on a 32 GB 5090 up to ~10–20 M Gaussians; tight on Colab beyond ~5 M. Peak memory is **identical** to a streaming design (§1.2). Decay-on-observation (§3.3) adds the restore pass — a masked in-place scatter over the unobserved rows, ∝ `(N−V)·C`: negligible where `V` is large (a room), ≤ one extra decay pass in the worst case (open scene).
 
 ---
 
@@ -122,11 +138,11 @@ Legend: **[done]** already in the repo; **[todo]** to build; **[user]** user-aut
 
 ### 4.2 `gaussian_renderer/__init__.py`
 
-- **[todo]** Replace the per-call zero seed at `:48` with a persistent, decayed histogram owned by the model: pass `pc.seg_hist` (decayed in place via `pc.seg_hist.mul_(β)` before the call), return it as `render_pkg["seg_votes"]` (`:145`). Guard with `num_segmentation_classes > 0 and gt_segmentation.numel() > 0` as today.
+- **[todo]** Replace the per-call zero seed at `:48` with the persistent histogram owned by the model. Two edits, both inside the existing guard (`num_segmentation_classes > 0 and gt_segmentation.numel() > 0 and pc.seg_hist.numel() > 0`, so eval/GUI renders stay inert, §4.4): (i) before the kernel, pass `pc.seg_hist` decayed in place via `pc.seg_hist.mul_(β)` and alias it as `vote_buffer` (`:55–56`); (ii) after the rasterizer call, restore the unrendered rows — `vote_buffer[(radii == 0).nonzero(...)] *= 1/β` (`:147–149`, §3.3). Returned as `render_pkg["seg_votes"]` (`:162`).
 
 ### 4.3 `scene/gaussian_model.py`
 
-- **[todo]** Add `self.seg_hist` `[N, C]` fp32 on `"cuda"`; allocate zero at `training_setup` (alongside the existing counters, `:215–219`); **resize in lockstep at every population change** — append at `densification_postfix` (children inherit or start fresh, §6.1) and mask at `prune_points` (`:406–410`); persist via `capture()`/`restore()` (`:88–92`/`:109–113`) **alongside** the five counters already persisted there.
+- **[todo]** Add `self.seg_hist` `[N, C]` fp32 on `"cuda"`; allocate zero at `training_setup` (alongside the existing counters, `:215–219`); **resize in lockstep at every population change** — append at `densification_postfix` (children inherit or start fresh, §6.1) and mask at `prune_points` (`:406–410`). **`M` is *not* checkpointed** (§6.9): allocate it zero after `restore()` and let it re-warm. The five counters continue to be persisted via `capture()`/`restore()` (`:88–92`/`:109–113`) — they are unaffected by this exclusion.
 - **[todo]** Read-out method returning `(consistency, structure, disagree, S)` from `M` — replaces doc 02 §4.1's `add_segmentation_consistency_stats` projected-centre proxy (superseded: labels are now sampled per pixel in the kernel).
 - **[done]** The five two-slot counters and their checkpoint persistence remain (retained for the consecutive-iteration streak rule; §6.5).
 
@@ -156,7 +172,7 @@ Legend: **[done]** already in the repo; **[todo]** to build; **[user]** user-aut
 | Item | Mechanism | Gain |
 |---|---|---|
 | 2a fused read-out | one kernel: row-sum + argmax together, over the touched set only | halves read-out traffic |
-| 2b visible-set decay | `index_select` on the cull list instead of global `mul_` | traffic ∝ V, not N; gives decay-on-observation |
+| 2b visible-set decay — *semantics shipped in the starting design (§3.3)* | current form: decay-all + masked restore of `radii == 0` rows (in-place scatter, allocates a `[U,C]` temp) | correct semantics already; remaining micro-opt: chunked `index_select` to bound the temp and make traffic ∝ `V` |
 | 2c division guard | `clamp_min(eps)` / skip `S=0` rows | kills 0/0 NaN |
 | 2d "lock" stable Gaussians | once `max(P) ≥ θ` for K consecutive iters, stop updating that row | perf + late-stage noise removal |
 
@@ -177,7 +193,8 @@ Legend: **[done]** already in the repo; **[todo]** to build; **[user]** user-aut
 | 5a β schedule | tie decay to `xyz_gradient_accum` (geometry-stability proxy) instead of a fixed constant |
 | 5b child inheritance | at densify, `M_child = c·M_parent` ⇒ identity inherited, confidence discounted (§6.1) |
 | 5c entropy signal | free `−ΣP log P` from the same row |
-| 5d streak counter | keep a separate `[P]` observation counter for the "≥3 consecutive iterations" test (§6.5) |
+| 5d streak counter | keep a separate `[N]` observation counter for the "≥3 consecutive iterations" test (§6.5) |
+| 5e staleness gate *(under consideration)* | a `[N]` "iterations since observed" clause in the maturity gate (reuses the 5d counter); would retire a long-absent Gaussian's eligibility **without** decaying `S`, so re-warm stays instant (§6.2a) |
 
 **Non-goals for the optimization stage:** streaming top-2 / Space-Saving (memory-identical, eviction lockout at β=0.99); per-iteration normalization (D1, discards mass weighting); point-sampling projected means.
 
@@ -186,13 +203,14 @@ Legend: **[done]** already in the repo; **[todo]** to build; **[user]** user-aut
 ## 6. Open questions & conflicts (resolve or flag before implementing)
 
 - **6.1 Child inheritance: doc 00 vs doc 02.** doc 00 `:15` says children "inherit parent Segmentation identity with discounted confidence"; doc 02 `:135` says they "start a fresh observation window". Under D2 these are one line apart: inherit **identity** = `M_child = c·M_parent` (same `P`, lower `S`); fresh = `M_child = 0`. **Must be settled** — they are opposite choices.
-- **6.2 Decay-all vs decay-on-observation.** §3.3. Only affects evidence `S`, never `P`. Adopting decay-on-observation avoids frustum-luck erosion of eligibility; decay-all is simpler and ~1 ms/iter.
+- **6.2 Decay semantics — DECIDED (2026-09-28): observation clock (S-A), keep it.** §3.3, implemented in the starting design. Rows decay only on observation; unobserved rows are restored. Rationale: (i) it matches the parameter-update clock — 3DGS moves only rendered Gaussians, so the histogram and the Gaussian state freeze and resume together; (ii) verified numerically, it holds the belief's effective observation count constant at ≈ `(1+β)/(1−β)` = 199 for *every* Gaussian regardless of view-sampling rate, whereas a wall-clock decay collapses it (a 1-in-10 Gaussian keeps only ~20 effective observations). Only affects evidence `S`, never `P`. Two follow-ons: **(a) staleness — under consideration (leaning, not frozen): stale-flag gate** — a `[N]` "iterations since observed" clause gating eligibility, reusing the §5d recency counter (§5 5e), as an alternative to wall-clock decay; deferred out of the starting design. **(b) "observed" = `radii > 0` (geometry proxy) — ACCEPTED as a documented looseness** (§3.3); a kernel evidence-flag is deferred.
 - **6.3 β value.** Starting hypothesis `0.99` (≈ one ~100-iteration densification window). Fixed constant first; escalate to a schedule only if empirically insufficient (§5a).
 - **6.4 `num_segmentation_classes = 88 → 100`.** office_0 has ids up to 98; 88 is a live out-of-bounds risk in the kernel (`arguments/__init__.py:60`). Safety-critical.
-- **6.5 `S` is mass, not a count.** The per-iteration row sums vary (measured `[2.09, 1.13, 1.16, 1.03, 0.29, 1.84]` in one step) and scale with footprint, so `S` cannot stand in for "number of iterations observed". Gate the abstain rule on mass (`S > τ`), and keep a separate `[P]` counter for the "≥3 consecutive" streak rule (EMA smooths that criterion away).
+- **6.5 `S` is mass, not a count.** The per-iteration row sums vary (measured `[2.09, 1.13, 1.16, 1.03, 0.29, 1.84]` in one step) and scale with footprint, so `S` cannot stand in for "number of iterations observed". Gate the abstain rule on mass (`S > τ`), and keep a separate `[N]` observation counter for the "≥3 consecutive" streak rule (EMA smooths that criterion away) — the same counter would double as the staleness clock if the §6.2a stale-flag gate is adopted.
 - **6.6 Doc 02 rows superseded.** §2 "Counter scheme" (two-slot), §2 "transient, not saved to checkpoint", §3.3 (`tot[g] += 1`), and §2/§3 "GT class at the projected image centre" are all superseded by this document; doc 02 should be amended or marked.
 - **6.7 Checkpoint back-compat.** Widening the checkpoint tuple (13 → 18 entries) breaks resume from old `chkpnt*.pth`. Accepted for a research repo; checkpoints must be regenerated.
 - **6.8 0/0 NaN.** Guard the `M / S` division (§5 2c); required, not optional.
+- **6.9 Checkpoint size — DECIDED: exclude `M` (option c).** For the current thesis `M` is **not** written to the checkpoint, so checkpoints stay small (no ~763 MB addition at 2M). Consequences: (i) `M` is allocated zero at `restore()` and re-warms over ~`1/(1−β)` ≈ 100 iterations; (ii) the min-evidence gate (§6.5) automatically suppresses density-control decisions during warm-up, so no special handling is needed; (iii) the checkpoint tuple widening (13 → 18) is now due to the **five counters alone** (§6.7), not to `M`.
 
 ---
 
@@ -207,6 +225,7 @@ Legend: **[done]** already in the repo; **[todo]** to build; **[user]** user-aut
 5. **No NaN.** No `0/0` in read-outs for never-observed Gaussians.
 6. **Downstream.** The consistency statistic correlates with GT class purity on a held-out view.
 7. **THE SPIKE (decides the thesis spine).** Dump each Gaussian's `(disagree, structure)` (doc 02 §7.6) and colour by whether its 3D position lies on a GT class boundary. Boundary Gaussians must occupy the high-`structure` region, floaters the low-`structure` region, interior the low-`disagree` region — visibly separable.
+8. **Decay-on-observation invariant.** A row culled in view `t` equals its pre-decay value (up to the §3.3 restore rounding); a rendered row equals `β·M_{t−1} + B_t`. Verify on a two-view sequence where a chosen Gaussian is culled in one.
 
 ---
 
