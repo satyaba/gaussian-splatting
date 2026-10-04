@@ -79,6 +79,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         decoder_iter = load_decoder_checkpoint(decoder, decoder_optimizer, scene.model_path + f"/decoder{first_iter}.pth")
         assert decoder_iter == first_iter, f"decoder checkpoint iteration {decoder_iter} != gaussians checkpoint {first_iter}"
 
+    # Warmup freeze (doc 03 §3.4): hold all Gaussian properties AND the persisted
+    # seg_hist fixed so only the segmentation encoding + decoder train until
+    # seg_warmup_iters. Guarded by first_iter so a resume past the boundary is
+    # never re-frozen.
+    gaussians.set_gaussian_properties_trainable(first_iter > opt.seg_warmup_iters)
+
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
@@ -116,8 +122,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         gaussians.update_learning_rate(iteration)
 
+        # Warmup freeze ends here: unfreeze properties + seg_hist so density
+        # control (gated below) and M accumulation resume together.
+        if iteration == opt.seg_warmup_iters + 1:
+            gaussians.set_gaussian_properties_trainable(True)
+
         # Every 1000 its we increase the levels of SH up to a maximum degree
-        if iteration % 1000 == 0:
+        if iteration % 1000 == 0 and iteration > opt.seg_warmup_iters:
             gaussians.oneupSHdegree()
 
         # Pick a random Camera
@@ -204,8 +215,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 scene.save(iteration)
                 save_decoder_checkpoint(decoder, decoder_optimizer, iteration, scene.model_path + f"/decoder{iteration}.pth")
 
-            # Densification
-            if iteration < opt.densify_until_iter:
+            # Densification — suppressed during the warmup freeze (doc 03 §3.4):
+            # also disables prune, add_densification_stats and reset_opacity,
+            # whose optimizer rewrites re-enable requires_grad and mutate values.
+            if iteration < opt.densify_until_iter and iteration > opt.seg_warmup_iters:
                 # Keep track of max radii in image-space for pruning
                 gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
                 gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)

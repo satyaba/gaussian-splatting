@@ -52,7 +52,8 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     # wrongly decayed are restored below, once the rasterizer reports which
     # Gaussians were visible. Net effect: observed rows = decay-then-add (§3.1);
     # unobserved rows keep their evidence (no erosion for being out of frustum).
-    if num_segmentation_classes > 0 and gt_segmentation.numel() > 0 and pc.seg_hist.numel() > 0:
+    if (num_segmentation_classes > 0 and gt_segmentation.numel() > 0
+            and pc.seg_hist.numel() > 0 and not pc.seg_hist_frozen):
         pc.seg_hist.mul_(pc.seg_hist_decay)
         vote_buffer = pc.seg_hist
     else:

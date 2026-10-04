@@ -55,6 +55,7 @@ class GaussianModel:
         self.num_segmentation_classes = num_segmentation_classes
         self.seg_hist_decay = 1.0                  # beta; overwritten in training_setup
         self.seg_hist_inherit_discount = 1.0       # c; overwritten in training_setup
+        self.seg_hist_frozen = False               # warmup: suppress M writes (set via set_gaussian_properties_trainable)
         self._xyz = torch.empty(0)
         self._features_dc = torch.empty(0)
         self._features_rest = torch.empty(0)
@@ -269,6 +270,19 @@ class GaussianModel:
                 lr = self.xyz_scheduler_args(iteration)
                 param_group['lr'] = lr
                 return lr
+
+    def set_gaussian_properties_trainable(self, flag: bool):
+        """Warmup freeze: toggle trainability of the Gaussian properties EXCEPT
+        the segmentation encoding, and freeze/unfreeze the persisted seg_hist.
+
+        When frozen (flag=False) the six photometric/geometric groups carry no
+        gradient and the renderer skips every write to M, so only the
+        segmentation encoding and the decoder warm up (doc 03 §3.4).
+        """
+        for p in (self._xyz, self._features_dc, self._features_rest,
+                  self._opacity, self._scaling, self._rotation):
+            p.requires_grad_(flag)
+        self.seg_hist_frozen = not flag
 
     def construct_list_of_attributes(self):
         l = ['x', 'y', 'z', 'nx', 'ny', 'nz']
