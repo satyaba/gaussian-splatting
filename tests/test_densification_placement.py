@@ -18,6 +18,7 @@
 import os
 import re
 import sys
+import unittest
 import py_compile
 from argparse import ArgumentParser
 
@@ -30,12 +31,16 @@ GM = os.path.join(ROOT, "scene", "gaussian_model.py")
 ARG = os.path.join(ROOT, "arguments", "__init__.py")
 TRAIN = os.path.join(ROOT, "train.py")
 
-try:  # keep pytest green on CPU-only hosts; __main__ guards manually
-    import pytest
-    _needs_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-except ImportError:  # pragma: no cover
-    def _needs_cuda(fn):
-        return fn
+def _needs_cuda(fn):
+    # Runner- AND pytest-agnostic skip. unittest.SkipTest is honored by pytest and
+    # caught by the __main__ runner below — unlike pytest.skip(), which raises an
+    # unhandled Skipped (pytest is installed in Colab) and aborts a script run.
+    def wrapper(*a, **k):
+        if not torch.cuda.is_available():
+            raise unittest.SkipTest("requires CUDA")
+        return fn(*a, **k)
+    wrapper.__name__ = getattr(fn, "__name__", "test")
+    return wrapper
 
 
 # --------------------------------------------------------------------------- #
@@ -78,12 +83,7 @@ def test_t1_sources_present_or_skip():
     gm, arg, tr = open(GM).read(), open(ARG).read(), open(TRAIN).read()
     present = ("seg_route_enabled" in arg) and ("_pad_mask" in gm) and ("seg_route_enabled" in tr)
     if not present:
-        try:
-            import pytest
-            pytest.skip("T1 routing block not implemented yet (doc 04 §5)")
-        except ImportError:
-            print("SKIP T1 sources (not implemented yet)")
-            return
+        raise unittest.SkipTest("T1 routing block not implemented yet (doc 04 §5)")
     assert all(k in gm for k in ("clone_mask", "split_mask", "floater_mask")), \
         "densify_and_prune does not accept regime masks"
     assert re.search(r"def _pad_mask", gm), "_pad_mask helper missing"
@@ -233,17 +233,24 @@ def test_random_ablation_differs():
     print("PASS ablation: seg_split_deterministic=False -> stochastic path differs")
 
 
+def _run(fn):
+    try:
+        fn()
+    except unittest.SkipTest as e:
+        print(f"SKIP {fn.__name__}: {e}")
+
+
 if __name__ == "__main__":
     print("torch", torch.__version__, "cuda", torch.version.cuda)
-    test_py_compile_edited_files()
-    test_t0_sources_present_and_wired()
-    test_t1_sources_present_or_skip()
-    test_t0_layout_math()
-    test_routing_mask_algebra()
+    _run(test_py_compile_edited_files)
+    _run(test_t0_sources_present_and_wired)
+    _run(test_t1_sources_present_or_skip)
+    _run(test_t0_layout_math)
+    _run(test_routing_mask_algebra)
     if not torch.cuda.is_available():
         print("SKIP GPU tests (no CUDA on this host)")
     else:
-        test_gpu_split_placement()
-        test_t0_determinism()
-        test_random_ablation_differs()
+        _run(test_gpu_split_placement)
+        _run(test_t0_determinism)
+        _run(test_random_ablation_differs)
     print("ALL DENSIFICATION-PLACEMENT TESTS PASSED")
