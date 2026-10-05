@@ -206,7 +206,7 @@ def test_gpu_split_placement():
     # j = i // K (this mirrors the .repeat(N,1) tiling used for base/rotation).
     fracs = torch.linspace(-1.0, 1.0, 2, device="cuda")
     for i in range(K * 2):
-        k, j = i % K, i // 2
+        k, j = i % K, i // K
         off = torch.zeros(3, device="cuda")
         off[major_ix[k]] = fracs[j] * rho * major_len[k]
         assert torch.allclose(children[i], px[k] + R[k] @ off, atol=1e-4), \
