@@ -56,6 +56,8 @@ class GaussianModel:
         self.seg_hist_decay = 1.0                  # beta; overwritten in training_setup
         self.seg_hist_inherit_discount = 1.0       # c; overwritten in training_setup
         self.seg_hist_frozen = False               # warmup: suppress M writes (set via set_gaussian_properties_trainable)
+        self.seg_split_deterministic = True        # T0: overwritten in training_setup
+        self.seg_split_offset_ratio = 0.5          # T0: overwritten in training_setup
         self._xyz = torch.empty(0)
         self._features_dc = torch.empty(0)
         self._features_rest = torch.empty(0)
@@ -225,6 +227,8 @@ class GaussianModel:
         # Persisted [N, C] mass histogram (doc 03 §4.3); decay/inherit knobs live on the model.
         self.seg_hist_decay = training_args.seg_hist_decay
         self.seg_hist_inherit_discount = training_args.seg_hist_inherit_discount
+        self.seg_split_deterministic = training_args.seg_split_deterministic
+        self.seg_split_offset_ratio = training_args.seg_split_offset_ratio
         self.seg_hist = torch.zeros((self.get_xyz.shape[0], self.num_segmentation_classes),
                                     dtype=torch.float32, device="cuda")
 
@@ -516,9 +520,19 @@ class GaussianModel:
         selected_pts_mask = torch.logical_and(selected_pts_mask,
                                               torch.max(self.get_scaling, dim=1).values > self.percent_dense*scene_extent)
 
-        stds = self.get_scaling[selected_pts_mask].repeat(N,1)
-        means =torch.zeros((stds.size(0), 3),device="cuda")
-        samples = torch.normal(mean=means, std=stds)
+        if self.seg_split_deterministic:
+            sel_scaling = self.get_scaling[selected_pts_mask]
+            K = sel_scaling.shape[0]
+            major_len, major_idx = sel_scaling.max(dim=1)
+            fracs = (torch.linspace(-1.0, 1.0, N, device="cuda") if N > 1 else torch.zeros(1, device="cuda"))
+            offs = torch.zeros((K,N, 3), device="cuda")
+            offs.scatter_(2, major_idx[:, None, None].expand(K, N, 1), (self.seg_split_offset_ratio * major_len)[:, None].mul(fracs[None, :]).unsqueeze(-1))
+            samples = offs.reshape(K * N, 3)
+        else:
+            stds = self.get_scaling[selected_pts_mask].repeat(N,1)
+            means =torch.zeros((stds.size(0), 3),device="cuda")
+            samples = torch.normal(mean=means, std=stds)
+
         rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N,1,1)
         new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[selected_pts_mask].repeat(N, 1)
         new_scaling = self.scaling_inverse_activation(self.get_scaling[selected_pts_mask].repeat(N,1) / (0.8*N))

@@ -111,6 +111,8 @@ class OptimizationParams(ParamGroup):
         self.seg_hist_decay = 0.99             # beta: exponential decay per iteration (§6.3)
         self.seg_hist_min_evidence = 1.0       # S gate, mass not count (§6.5)
         self.seg_hist_inherit_discount = 0.5   # c: M_child = c * M_parent at densify (§6.1)
+        self.seg_split_deterministic = True     # T0: children at fixed +/- offsets (False = vanilla N(0,Sigma))
+        self.seg_split_offset_ratio = 0.5       # rho: children at +/- rho * major-axis length
         super().__init__(parser, "Optimization Parameters")
 
 def get_combined_args(parser : ArgumentParser):
