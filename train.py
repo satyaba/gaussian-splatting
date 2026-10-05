@@ -254,16 +254,24 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         tb_writer.add_histogram("seg/disagree", disagree, iteration)
                         tb_writer.add_histogram("seg/evidence_S", S, iteration)
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                    gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold, radii)
+
+                    clone_mask = split_mask = floater_mask = None
+                    if opt.seg_route_enabled:
+                        act = S > opt.seg_hist_min_evidence
+                        if bool(act.any()):
+                            tau_d = torch.quantile(disagree[act], opt.seg_q_disagree)
+                            tau_s = torch.quantile(structure[act], opt.seg_q_structure)
+                            clone_mask   = act & (disagree <  tau_d)
+                            split_mask   = act & (disagree >= tau_d) & (structure >= tau_s)
+                            floater_mask = act & (disagree >= tau_d) & (structure <  tau_s)
+                        # else: no evidence -> all None -> vanilla fallback
+
+                    gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent,
+                                                size_threshold, radii,
+                                                clone_mask=clone_mask, split_mask=split_mask, floater_mask=floater_mask)
 
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                     gaussians.reset_opacity()
-
-            # Confidence-gated splitting hook (deferred until the rendering
-            # path is verified correct — doc 01 §6). Uses decoded seg outputs
-            # and argmax-stability tracking once implemented.
-            if iteration > opt.seg_warmup_iters:
-                pass  # 4-way split + discounted-confidence inheritance hook in here
 
             # Optimizer step
             if iteration < opt.iterations:

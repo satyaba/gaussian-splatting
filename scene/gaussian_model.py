@@ -511,7 +511,19 @@ class GaussianModel:
         if new_seg_hist is not None:
             self.seg_hist = torch.cat((self.seg_hist, new_seg_hist), dim=0)
 
-    def densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
+    @staticmethod
+    def _pad_mask(mask, n):
+        """Regime masks are length P_old. split runs AFTER clone (which appended
+        rows at the tail), so a mask handed to split must be padded with False to
+        the new length — a freshly created child is never pre-selected (doc 02 §5).
+        None passes through unchanged (vanilla fallback)."""
+        if mask is None or mask.shape[0] == n:
+            return mask
+        out = torch.zeros(n, dtype=torch.bool, device="cuda")
+        out[:mask.shape[0]] = mask
+        return out
+
+    def densify_and_split(self, grads, grad_threshold, scene_extent, N=2, sel_mask=None):
         n_init_points = self.get_xyz.shape[0]
         # Extract points that satisfy the gradient condition
         padded_grad = torch.zeros((n_init_points), device="cuda")
@@ -519,6 +531,9 @@ class GaussianModel:
         selected_pts_mask = torch.where(padded_grad >= grad_threshold, True, False)
         selected_pts_mask = torch.logical_and(selected_pts_mask,
                                               torch.max(self.get_scaling, dim=1).values > self.percent_dense*scene_extent)
+        if sel_mask is not None:                                                 # NEW (T1): boundary regime
+            selected_pts_mask = torch.logical_and(
+                selected_pts_mask, self._pad_mask(sel_mask, n_init_points))
 
         if self.seg_split_deterministic:
             sel_scaling = self.get_scaling[selected_pts_mask]
@@ -552,11 +567,13 @@ class GaussianModel:
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
         self.prune_points(prune_filter)
 
-    def densify_and_clone(self, grads, grad_threshold, scene_extent):
+    def densify_and_clone(self, grads, grad_threshold, scene_extent, sel_mask=None):
         # Extract points that satisfy the gradient condition
         selected_pts_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
         selected_pts_mask = torch.logical_and(selected_pts_mask,
                                               torch.max(self.get_scaling, dim=1).values <= self.percent_dense*scene_extent)
+        if sel_mask is not None:                                                 # NEW (T1): interior regime
+            selected_pts_mask = torch.logical_and(selected_pts_mask, sel_mask)
 
         new_xyz = self._xyz[selected_pts_mask]
         new_features_dc = self._features_dc[selected_pts_mask]
@@ -571,13 +588,25 @@ class GaussianModel:
 
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_seg_encoding, new_tmp_radii, new_seg_hist)
 
-    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, radii):
-        grads = self.xyz_gradient_accum / self.denom
+    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, radii,
+                          clone_mask=None, split_mask=None, floater_mask=None):
+        self.tmp_radii = radii                       # set BEFORE prune_points (it prunes tmp_radii)
+
+        # floater -> prune FIRST, while every mask is index-aligned to the
+        # pre-densification population (P_old). Subsetting the survivor masks by
+        # ~floater keeps clone/split aligned across the removal, without having to
+        # remap indices past split's own parent-removal.
+        if floater_mask is not None:
+            self.prune_points(floater_mask)
+            keep = ~floater_mask
+            clone_mask = clone_mask[keep] if clone_mask is not None else None
+            split_mask = split_mask[keep] if split_mask is not None else None
+
+        grads = self.xyz_gradient_accum / self.denom   # recomputed: the prune above changed the length
         grads[grads.isnan()] = 0.0
 
-        self.tmp_radii = radii
-        self.densify_and_clone(grads, max_grad, extent)
-        self.densify_and_split(grads, max_grad, extent)
+        self.densify_and_clone(grads, max_grad, extent, sel_mask=clone_mask)   # interior -> clone
+        self.densify_and_split(grads, max_grad, extent, sel_mask=split_mask)   # boundary -> split
 
         prune_mask = (self.get_opacity < min_opacity).squeeze()
         if max_screen_size:
@@ -585,7 +614,6 @@ class GaussianModel:
             big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
         self.prune_points(prune_mask)
-        tmp_radii = self.tmp_radii
         self.tmp_radii = None
 
         torch.cuda.empty_cache()

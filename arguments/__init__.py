@@ -3,7 +3,7 @@
 # GRAPHDECO research group, https://team.inria.fr/graphdeco
 # All rights reserved.
 #
-# This software is free for non-commercial, research and evaluation use 
+# This software is free for non-commercial, research and evaluation use
 # under the terms of the LICENSE.md file.
 #
 # For inquiries contact  george.drettakis@inria.fr
@@ -25,7 +25,7 @@ class ParamGroup:
                 shorthand = True
                 key = key[1:]
             t = type(value)
-            value = value if not fill_none else None 
+            value = value if not fill_none else None
             if shorthand:
                 if t == bool:
                     group.add_argument("--" + key, ("-" + key[0:1]), default=value, action="store_true")
@@ -44,7 +44,7 @@ class ParamGroup:
                 setattr(group, arg[0], arg[1])
         return group
 
-class ModelParams(ParamGroup): 
+class ModelParams(ParamGroup):
     def __init__(self, parser, sentinel=False):
         self.sh_degree = 3
         self._source_path = ""
@@ -113,6 +113,9 @@ class OptimizationParams(ParamGroup):
         self.seg_hist_inherit_discount = 0.5   # c: M_child = c * M_parent at densify (§6.1)
         self.seg_split_deterministic = True     # T0: children at fixed +/- offsets (False = vanilla N(0,Sigma))
         self.seg_split_offset_ratio = 0.5       # rho: children at +/- rho * major-axis length
+        self.seg_route_enabled = False
+        self.seg_q_disagree = 0.75      # Threshold (quantile) for disagree
+        self.seg_q_structure = 0.50
         super().__init__(parser, "Optimization Parameters")
 
 def get_combined_args(parser : ArgumentParser):
