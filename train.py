@@ -99,6 +99,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     ema_loss_for_log = 0.0
     ema_Ll1depth_for_log = 0.0
     ema_Ll1seg_for_log = 0.0
+    # seg/photometric loss ratio, aggregated over a 100-iter window
+    seg_ce_window_sum = 0.0
+    photo_window_sum = 0.0
+    seg_photo_ratio = 0.0
 
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
@@ -161,6 +165,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             ssim_value = ssim(image, gt_image)
 
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+        photo_loss_value = loss.item()   # unweighted photometric objective, for seg/photo ratio
 
         # Depth regularization
         Ll1depth_pure = 0.0
@@ -182,11 +187,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         seg_logits = decoder(rendered_seg.permute(1, 2, 0))             # [H, W, num_segmentation_classes]
         gt_segmentation = getattr(viewpoint_cam, "gt_segmentation", None)
         Ll1seg = 0.0
+        seg_ce_raw = None
         if gt_segmentation is not None:
-            L_seg = opt.lambda_seg * torch.nn.functional.cross_entropy(
+            seg_ce_raw = torch.nn.functional.cross_entropy(
                 seg_logits.reshape(-1, dataset.num_segmentation_classes),
                 gt_segmentation.cuda().reshape(-1).long(),
                 ignore_index=-1)  # void rule v1: ignore pixels labeled 255
+            L_seg = opt.lambda_seg * seg_ce_raw
             loss = loss + L_seg
             Ll1seg = L_seg.item()
         for param_group in decoder_optimizer.param_groups:
@@ -202,8 +209,20 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             ema_Ll1depth_for_log = 0.4 * Ll1depth + 0.6 * ema_Ll1depth_for_log
             ema_Ll1seg_for_log = 0.4 * Ll1seg + 0.6 * ema_Ll1seg_for_log
 
+            # seg/photometric loss ratio: raw (unweighted) CE vs the unweighted
+            # photometric objective, aggregated then reported every 100 iters.
+            if seg_ce_raw is not None:
+                seg_ce_window_sum += seg_ce_raw.item()
+                photo_window_sum += photo_loss_value
+            if iteration % 100 == 0 and photo_window_sum > 0:
+                seg_photo_ratio = seg_ce_window_sum / photo_window_sum
+                if tb_writer:
+                    tb_writer.add_scalar("loss/seg_photo_ratio", seg_photo_ratio, iteration)
+                seg_ce_window_sum = 0.0
+                photo_window_sum = 0.0
+
             if iteration % 10 == 0:
-                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "Depth Loss": f"{ema_Ll1depth_for_log:.{7}f}", "Seg Loss": f"{ema_Ll1seg_for_log:.{7}f}"})
+                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "Depth Loss": f"{ema_Ll1depth_for_log:.{7}f}", "Seg Loss": f"{ema_Ll1seg_for_log:.{7}f}", "S/P": f"{seg_photo_ratio:.{4}f}"})
                 progress_bar.update(10)
             if iteration == opt.iterations:
                 progress_bar.close()
