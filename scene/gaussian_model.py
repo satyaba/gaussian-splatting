@@ -527,7 +527,10 @@ class GaussianModel:
             fracs = (torch.linspace(-1.0, 1.0, N, device="cuda") if N > 1 else torch.zeros(1, device="cuda"))
             offs = torch.zeros((K,N, 3), device="cuda")
             offs.scatter_(2, major_idx[:, None, None].expand(K, N, 1), (self.seg_split_offset_ratio * major_len)[:, None].mul(fracs[None, :]).unsqueeze(-1))
-            samples = offs.reshape(K * N, 3)
+            # Match the runtime tiling: base/rotation use .repeat(N,1) so row i
+            # belongs to parent (i % K). Tile the offsets the same way (transpose,
+            # NOT reshape) or children inherit the wrong parent's offset vector.
+            samples = offs.transpose(0, 1).reshape(K * N, 3)
         else:
             stds = self.get_scaling[selected_pts_mask].repeat(N,1)
             means =torch.zeros((stds.size(0), 3),device="cuda")

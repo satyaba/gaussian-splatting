@@ -202,15 +202,15 @@ def test_gpu_split_placement():
     major_len, major_ix = ps.max(dim=1)
     K = px.shape[0]
     assert children.shape[0] == K * 2, f"expected {K * 2} children, got {children.shape[0]}"
-    for k in range(K):
-        e0 = torch.zeros(3, device="cuda")
-        e0[major_ix[k]] = -rho * major_len[k]
-        e1 = torch.zeros(3, device="cuda")
-        e1[major_ix[k]] = rho * major_len[k]
-        assert torch.allclose(children[k * 2], px[k] + R[k] @ e0, atol=1e-4), \
-            f"child 0 of parent {k} misplaced"
-        assert torch.allclose(children[k * 2 + 1], px[k] + R[k] @ e1, atol=1e-4), \
-            f"child 1 of parent {k} misplaced"
+    # Row i of the appended block belongs to parent k = i % K with offset index
+    # j = i // K (this mirrors the .repeat(N,1) tiling used for base/rotation).
+    fracs = torch.linspace(-1.0, 1.0, 2, device="cuda")
+    for i in range(K * 2):
+        k, j = i % K, i // 2
+        off = torch.zeros(3, device="cuda")
+        off[major_ix[k]] = fracs[j] * rho * major_len[k]
+        assert torch.allclose(children[i], px[k] + R[k] @ off, atol=1e-4), \
+            f"child {i} (parent {k}, offset {j}) misplaced"
     print(f"PASS GPU T0 placement ({K} parents -> {children.shape[0]} children, rho={rho})")
 
 
