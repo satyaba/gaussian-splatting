@@ -16,6 +16,7 @@ from utils.loss_utils import l1_loss, ssim
 from gaussian_renderer import render, network_gui
 import sys
 from scene import Scene, GaussianModel
+from scene.gaussian_model import save_seg_hist
 from scene.segmentation_decoder import SegmentationDecoder, save_decoder_checkpoint, load_decoder_checkpoint
 from utils.general_utils import safe_state, get_expon_lr_func
 import uuid
@@ -233,6 +234,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
                 save_decoder_checkpoint(decoder, decoder_optimizer, iteration, scene.model_path + f"/decoder{iteration}.pth")
+                save_seg_hist(gaussians, iteration, scene.model_path + f"/seg_hist{iteration}.npz")
 
             # Densification — suppressed during the warmup freeze (doc 03 §3.4):
             # also disables prune, add_densification_stats and reset_opacity,

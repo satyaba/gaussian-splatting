@@ -614,3 +614,23 @@ class GaussianModel:
     def add_densification_stats(self, viewspace_point_tensor, update_filter):
         self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
         self.denom[update_filter] += 1
+
+
+def save_seg_hist(gaussians, iteration, path):
+    """Persist the [N, C] segmentation mass histogram M as a compressed NumPy
+    .npz (doc 03 §4.3). Also pandas-friendly:
+        arr = np.load(path)["seg_hist"]; pd.DataFrame(arr)
+
+    No-op when the histogram is unallocated (num_segmentation_classes <= 0).
+    """
+    M = gaussians.seg_hist
+    if M.numel() == 0:
+        return
+    np.savez_compressed(
+        path,
+        seg_hist=M.detach().to("cpu", torch.float32).numpy(),
+        iteration=np.int64(iteration),
+        num_gaussians=np.int64(M.shape[0]),
+        num_segmentation_classes=np.int64(gaussians.num_segmentation_classes),
+        seg_hist_decay=np.float32(gaussians.seg_hist_decay),
+    )
