@@ -13,7 +13,7 @@ import os
 import torch
 from random import randint
 from utils.loss_utils import l1_loss, ssim
-from gaussian_renderer import render, network_gui
+from gaussian_renderer import render, network_gui, accumulate_histograms
 import sys
 from scene import Scene, GaussianModel
 from scene.gaussian_model import save_seg_hist
@@ -205,6 +205,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         iter_end.record()
 
         with torch.no_grad():
+            # Cumulative mass + pixel-wise error histograms (no decay, no child
+            # inheritance). Gated only by the seg_hist warmup freeze; replays this
+            # render's sorted geometry, so no extra rasterization is incurred.
+            accumulate_histograms(gaussians, render_pkg, image, gt_image,
+                                  opt.num_error_bins,
+                                  enabled=not gaussians.seg_hist_frozen)
+
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
             ema_Ll1depth_for_log = 0.4 * Ll1depth + 0.6 * ema_Ll1depth_for_log
@@ -253,6 +260,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         tb_writer.add_histogram("seg/structure", structure, iteration)
                         tb_writer.add_histogram("seg/disagree", disagree, iteration)
                         tb_writer.add_histogram("seg/evidence_S", S, iteration)
+                        mass_h, error_h = gaussians.mass_error_readout()
+                        if mass_h is not None:
+                            tb_writer.add_histogram("hist/mass", mass_h, iteration)
+                            tb_writer.add_histogram("hist/error_total", error_h.sum(dim=1), iteration)
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
 
                     clone_mask = split_mask = floater_mask = None

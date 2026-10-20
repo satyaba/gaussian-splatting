@@ -71,6 +71,9 @@ class GaussianModel:
         self.seg_n2 = torch.empty(0, dtype=torch.int32)
         self.seg_n_tot = torch.empty(0, dtype=torch.int32)
         self.seg_hist = torch.empty(0)  # [N, C] fp32 persisted mass histogram (doc 03)
+        self.error_hist = torch.empty(0)  # [N, B] fp32 cumulative per-view error histogram
+        self.mass_hist = torch.empty(0)   # [N] fp32 cumulative alpha*T mass
+        self.num_error_bins = 0
         self.max_radii2D = torch.empty(0)
         self.xyz_gradient_accum = torch.empty(0)
         self.denom = torch.empty(0)
@@ -231,6 +234,19 @@ class GaussianModel:
         self.seg_split_offset_ratio = training_args.seg_split_offset_ratio
         self.seg_hist = torch.zeros((self.get_xyz.shape[0], self.num_segmentation_classes),
                                     dtype=torch.float32, device="cuda")
+
+        # Cumulative (no decay, no child inheritance) mass + pixel-wise error
+        # histograms. Independent of the segmentation config; accumulation is
+        # gated only by the seg_hist warmup freeze (set_gaussian_properties_trainable).
+        self.num_error_bins = training_args.num_error_bins
+        if self.num_error_bins > 0:
+            self.error_hist = torch.zeros((self.get_xyz.shape[0], self.num_error_bins),
+                                          dtype=torch.float32, device="cuda")
+            self.mass_hist = torch.zeros((self.get_xyz.shape[0],),
+                                         dtype=torch.float32, device="cuda")
+        else:
+            self.error_hist = torch.empty(0)
+            self.mass_hist = torch.empty(0)
 
         l = [
             {'params': [self._xyz], 'lr': training_args.position_lr_init * self.spatial_lr_scale, "name": "xyz"},
@@ -453,6 +469,10 @@ class GaussianModel:
         self.seg_n_tot = self.seg_n_tot[valid_points_mask]
         self.seg_hist = self.seg_hist[valid_points_mask]
 
+        if self.error_hist.numel() > 0:
+            self.error_hist = self.error_hist[valid_points_mask]
+            self.mass_hist = self.mass_hist[valid_points_mask]
+
 
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
@@ -510,6 +530,15 @@ class GaussianModel:
         # not a zero-reset like the counters above — the histogram is persistent.
         if new_seg_hist is not None:
             self.seg_hist = torch.cat((self.seg_hist, new_seg_hist), dim=0)
+
+        # Cumulative semantics: children start fresh — NO inheritance/discount,
+        # unlike seg_hist above (a plain append of zeros).
+        if self.error_hist.numel() > 0:
+            new_n = new_xyz.shape[0]
+            self.error_hist = torch.cat((self.error_hist,
+                torch.zeros((new_n, self.num_error_bins), dtype=torch.float32, device="cuda")), dim=0)
+            self.mass_hist = torch.cat((self.mass_hist,
+                torch.zeros((new_n,), dtype=torch.float32, device="cuda")), dim=0)
 
     @staticmethod
     def _pad_mask(mask, n):
@@ -641,6 +670,19 @@ class GaussianModel:
         structure = top2[:, 0] + top2[:, 1] if k == 2 else top2[:, 0]
         disagree = 1.0 - top2[:, 0]
         return consistency, structure, disagree, S
+
+    @torch.no_grad()
+    def mass_error_readout(self):
+        """Read-outs of the cumulative mass/error histograms.
+
+        Returns `(mass, error_hist)`, each [N] and [N, B] fp32, or `(None, None)`
+        when the buffers are unallocated (`num_error_bins <= 0`). `mass[g]` is the
+        running sum of alpha*T; `error_hist[g, b]` is the running sum restricted to
+        pixels whose per-pixel L1 landed in bin b.
+        """
+        if self.mass_hist.numel() == 0:
+            return None, None
+        return self.mass_hist, self.error_hist
 
     def add_densification_stats(self, viewspace_point_tensor, update_filter):
         self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)

@@ -11,7 +11,7 @@
 
 import torch
 import math
-from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
+from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer, rasterize_histograms
 from scene.gaussian_model import GaussianModel
 from utils.sh_utils import eval_sh
 
@@ -117,7 +117,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
 
     # Rasterize visible Gaussians to image, obtain their radii (on screen).
     if separate_sh:
-        rendered_image, rendered_seg, radii, depth_image = rasterizer(
+        rendered_image, rendered_seg, radii, depth_image, geom_buffer, binning_buffer, img_buffer, num_rendered = rasterizer(
             means3D = means3D,
             means2D = means2D,
             dc = dc,
@@ -129,7 +129,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             rotations = rotations,
             cov3D_precomp = cov3D_precomp)
     else:
-        rendered_image, rendered_seg, radii, depth_image = rasterizer(
+        rendered_image, rendered_seg, radii, depth_image, geom_buffer, binning_buffer, img_buffer, num_rendered = rasterizer(
             means3D = means3D,
             means2D = means2D,
             shs = shs,
@@ -164,7 +164,55 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         "viewspace_points": screenspace_points,
         "visibility_filter" : (radii > 0).nonzero(),
         "radii": radii,
-        "depth" : depth_image
+        "depth" : depth_image,
+        # Raw forward state, kept so accumulate_histograms can replay the sorted
+        # geometry without re-rendering (cumulative mass/error histograms).
+        "geom_buffer": geom_buffer,
+        "binning_buffer": binning_buffer,
+        "img_buffer": img_buffer,
+        "num_rendered": num_rendered,
+        "num_points": pc.get_xyz.shape[0],
+        "image_height": int(viewpoint_camera.image_height),
+        "image_width": int(viewpoint_camera.image_width),
         }
 
     return out
+
+
+@torch.no_grad()
+def accumulate_histograms(pc, render_pkg, image, gt_image, num_error_bins, enabled=True):
+    """Cumulative per-Gaussian mass + pixel-wise error histogram accumulation.
+
+    Replays the sorted geometry of the most recent render (`render_pkg`) against
+    the per-pixel L1 error map, reusing the exact alpha/T trajectory of the colour
+    pass. `mass_hist[g]` accrues sum(alpha*T); `error_hist[g, b]` accrues
+    sum(alpha*T) over pixels whose L1 falls in bin b. No decay, no inheritance:
+    both are plain running sums across every training view/iteration. Gated only
+    by the seg_hist warmup freeze (`enabled = not pc.seg_hist_frozen`).
+    """
+    if not enabled:
+        return
+    if pc.mass_hist.numel() == 0 or pc.error_hist.numel() == 0:
+        return
+    if render_pkg.get("geom_buffer") is None:
+        return
+
+    H = render_pkg["image_height"]
+    W = render_pkg["image_width"]
+    # Per-pixel L1 (mean over RGB), matching the training loss; quantized to
+    # uniform bins over [0, 1].
+    err = (image.detach() - gt_image.detach()).abs().mean(dim=0)   # [H, W] in [0, 1]
+    error_bins = torch.clamp((err * num_error_bins).long(),
+                             max=num_error_bins - 1).contiguous()
+    rasterize_histograms(
+        render_pkg["geom_buffer"],
+        render_pkg["binning_buffer"],
+        render_pkg["img_buffer"],
+        render_pkg["num_points"],
+        int(render_pkg["num_rendered"].item()),
+        H, W,
+        error_bins,
+        num_error_bins,
+        pc.mass_hist,
+        pc.error_hist,
+    )
