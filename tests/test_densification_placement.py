@@ -1,20 +1,14 @@
-# Acceptance test for segmentation-gated densification placement (T0 deterministic
-# split placement; design doc 04 §4 / §7).
+# Acceptance tests for segmentation-guided densification (SGDense).
 # Run on a GPU machine with the rebuilt extension installed:
 #   python tests/test_densification_placement.py
 # (pytest-compatible: pytest tests/test_densification_placement.py)
 #
 # Covers:
-#   §7.1  py_compile of the edited files
-#   §7.1' static: the T0 fix is present AND wired onto the model (the two failure
-#         modes that survived the first fix: the 'offsite' typo and the missing
-#         __init__/training_setup assignment -> AttributeError at first split)
-#   §7.2  routing mask algebra (spec-level; the T1 block is inline in train.py)
-#   §7.3  _pad_mask semantics               [SKIP until T1 lands]
-#   §7.7  T0 determinism + random-path ablation parity  (real densify_and_split)
-#   --    a real GPU densify_and_split placement check (children at +/- rho*sigma_major)
-# §7.5 THE SPIKE and §7.6 threshold calibration need a trained checkpoint +
-# gt_segmentation and live in a separate notebook step, not here.
+#   py_compile of the edited files
+#   static: SGDense category-routing sources present (arguments / train / model)
+#   seg_hist_readout 6-tuple algebra (pure torch, CPU)
+#   real GPU densify_and_split child count / ordering
+# §7.5 THE SPIKE / §7.6 calibration live in spike_route.py.
 import os
 import re
 import sys
@@ -31,10 +25,10 @@ GM = os.path.join(ROOT, "scene", "gaussian_model.py")
 ARG = os.path.join(ROOT, "arguments", "__init__.py")
 TRAIN = os.path.join(ROOT, "train.py")
 
+
 def _needs_cuda(fn):
     # Runner- AND pytest-agnostic skip. unittest.SkipTest is honored by pytest and
-    # caught by the __main__ runner below — unlike pytest.skip(), which raises an
-    # unhandled Skipped (pytest is installed in Colab) and aborts a script run.
+    # caught by the __main__ runner below.
     def wrapper(*a, **k):
         if not torch.cuda.is_available():
             raise unittest.SkipTest("requires CUDA")
@@ -44,7 +38,7 @@ def _needs_cuda(fn):
 
 
 # --------------------------------------------------------------------------- #
-# §7.1 / §7.1'  static checks                                                 #
+# static checks                                                                #
 # --------------------------------------------------------------------------- #
 def test_py_compile_edited_files():
     for f in (GM, ARG, TRAIN):
@@ -52,109 +46,53 @@ def test_py_compile_edited_files():
     print("PASS py_compile (gaussian_model.py, arguments/__init__.py, train.py)")
 
 
-def test_t0_sources_present_and_wired():
-    gm, arg = open(GM).read(), open(ARG).read()
-
-    # arguments define both knobs, with the correct spelling.
-    assert re.search(r"self\.seg_split_deterministic\s*=", arg), \
-        "arguments: seg_split_deterministic missing"
-    assert re.search(r"self\.seg_split_offset_ratio\s*=", arg), \
-        "arguments: seg_split_offset_ratio missing (the 'offsite' typo?)"
-    assert "offsite" not in arg, "'offsite' misspelling present in arguments/__init__.py"
-
-    # the split block is guarded and reads the ratio; major_idx is bound first.
-    assert "if self.seg_split_deterministic:" in gm, \
-        "densify_and_split is not guarded by seg_split_deterministic"
-    assert "self.seg_split_offset_ratio" in gm, \
-        "densify_and_split does not read seg_split_offset_ratio"
-    assert re.search(r"major_len\s*,\s*major_idx\s*=", gm), \
-        "major_idx is not bound before its scatter_() use (old NameError)"
-
-    # THE WIRING: the flags must be set on the model, not only on the args
-    # namespace, or self.seg_split_deterministic raises AttributeError at runtime.
-    assert re.search(r"self\.seg_split_deterministic\s*=", gm), \
-        "GaussianModel never assigns self.seg_split_deterministic (AttributeError at first split)"
-    assert re.search(r"self\.seg_split_offset_ratio\s*=", gm), \
-        "GaussianModel never assigns self.seg_split_offset_ratio (AttributeError at first split)"
-    print("PASS T0 sources present and wired onto the model")
-
-
-def test_t1_sources_present_or_skip():
+def test_sgdense_sources_present_or_skip():
     gm, arg, tr = open(GM).read(), open(ARG).read(), open(TRAIN).read()
-    present = ("seg_route_enabled" in arg) and ("_pad_mask" in gm) and ("seg_route_enabled" in tr)
+    present = ("class SGDenseParams" in arg) and ("generate_category_masks" in tr) \
+        and ("interior_mask" in gm)
     if not present:
-        raise unittest.SkipTest("T1 routing block not implemented yet (doc 04 §5)")
-    assert all(k in gm for k in ("clone_mask", "split_mask", "floater_mask")), \
-        "densify_and_prune does not accept regime masks"
-    assert re.search(r"def _pad_mask", gm), "_pad_mask helper missing"
-    print("PASS T1 sources present")
+        raise unittest.SkipTest("SGDense routing not implemented")
+    assert "class SGDenseParams" in arg, "arguments: SGDenseParams missing"
+    assert "generate_category_masks" in tr, "train.py does not call generate_category_masks"
+    assert "DensificationConfig" in tr and "s_tilde" in tr, \
+        "train.py does not build/pass the SGDense config + texture scores"
+    assert re.search(r"def densify_and_prune", gm), "GaussianModel.densify_and_prune missing"
+    assert all(k in gm for k in ("interior_mask", "boundary_mask", "floater_mask", "other_mask")), \
+        "densify_and_prune does not accept the four category masks"
+    assert re.search(r"def _remap_after_split", gm), "_remap_after_split helper missing"
+    print("PASS SGDense sources present")
+
+
+def test_deterministic_split_removed():
+    gm, arg = open(GM).read(), open(ARG).read()
+    assert "seg_split_deterministic" not in gm, "deterministic-split machinery still in gaussian_model.py"
+    assert "seg_split_offset_ratio" not in gm, "seg_split_offset_ratio still in gaussian_model.py"
+    assert "seg_split_deterministic" not in arg, "seg_split_deterministic still in arguments"
+    assert "seg_split_offset_ratio" not in arg, "seg_split_offset_ratio still in arguments"
+    print("PASS deterministic split fully removed")
 
 
 # --------------------------------------------------------------------------- #
-# §7.2  T0 layout math (pure torch, CPU)                                       #
+# seg_hist_readout 6-tuple algebra (pure torch, CPU)                           #
 # --------------------------------------------------------------------------- #
-def test_t0_layout_math():
-    K, N, rho = 6, 2, 0.5
-    torch.manual_seed(0)
-    sigma = torch.rand(K, 3) * 0.5 + 0.05                    # positive scalings
-    major_len, major_ix = sigma.max(dim=1)
-    fracs = torch.linspace(-1.0, 1.0, N)
-    offs = torch.zeros(K, N, 3)
-    offs.scatter_(2, major_ix[:, None, None].expand(K, N, 1),
-                  (rho * major_len)[:, None].mul(fracs[None, :]).unsqueeze(-1))
-    s = offs.reshape(K * N, 3)
-    for k in range(K):
-        c0, c1 = s[k * N], s[k * N + 1]
-        e = torch.zeros(3)
-        e[major_ix[k]] = rho * major_len[k]
-        off = torch.ones(3, dtype=torch.bool)
-        off[major_ix[k]] = False
-        assert torch.allclose(c0, -e, atol=1e-6), f"child0 of parent {k} != -rho*sigma_major"
-        assert torch.allclose(c1, e, atol=1e-6), f"child1 of parent {k} != +rho*sigma_major"
-        assert torch.allclose(c0, -c1, atol=1e-6), f"children of parent {k} not symmetric"
-        assert torch.allclose(c1[off], torch.zeros(int(off.sum())), atol=1e-6), \
-            f"parent {k}: offset leaked onto a non-major axis"
-    print("PASS T0 layout math (+/- rho*sigma_major on major axis, symmetric, order k*N+j)")
+def test_seg_hist_readout_algebra():
+    from sgdense.readout import seg_hist_readout
+    M = torch.tensor([[3.0, 1.0, 0.0],
+                      [0.0, 0.0, 0.0],
+                      [1.0, 1.0, 1.0]])
+    consistency, structure, disagree, entropy, top2, S = seg_hist_readout(M)
+    assert torch.allclose(S, M.sum(dim=1)), "S must be the row mass"
+    assert torch.allclose(consistency, top2[:, 0]), "consistency must equal P_(1)"
+    assert torch.allclose(disagree, 1.0 - top2[:, 0]), "disagree must equal 1 - P_(1)"
+    assert torch.allclose(structure, top2[:, 0] + top2[:, 1]), "structure must equal P_(1)+P_(2)"
+    assert (entropy >= -1e-6).all(), "entropy must be non-negative"
+    # Zero-evidence row -> P == 0 -> equal top-2, maximal disagree.
+    assert torch.allclose(top2[1], torch.zeros(2)), "zero-evidence row must give P == 0"
+    print("PASS seg_hist_readout algebra")
 
 
 # --------------------------------------------------------------------------- #
-# §7.2'  routing mask algebra (spec-level; mirrors train.py's inline block)    #
-# --------------------------------------------------------------------------- #
-def _route(disagree, structure, S, v_min, q_disagree, q_structure):
-    """Mirror of the mask construction proposed in doc 04 §5 (train.py).
-
-    Returns (interior, boundary, floater), each a bool mask over the same
-    population, or (None, None, None) when there is no evidence.
-    """
-    act = S > v_min
-    if not bool(act.any()):
-        return None, None, None
-    tau_d = torch.quantile(disagree[act], q_disagree)
-    tau_s = torch.quantile(structure[act], q_structure)
-    boundary = act & (disagree >= tau_d) & (structure >= tau_s)
-    floater = act & (disagree >= tau_d) & (structure < tau_s)
-    interior = act & (disagree < tau_d)
-    return interior, boundary, floater
-
-
-def test_routing_mask_algebra():
-    torch.manual_seed(1)
-    P = 500
-    disagree, structure, S = torch.rand(P), torch.rand(P), torch.rand(P) * 3
-    interior, boundary, floater = _route(disagree, structure, S, 1.0, 0.75, 0.5)
-    act = S > 1.0
-
-    assert torch.equal(interior | boundary | floater, act), "3 masks do not partition the active set"
-    overlap = int((interior & boundary).sum() + (interior & floater).sum() + (boundary & floater).sum())
-    assert overlap == 0, f"regime masks overlap on {overlap} Gaussians"
-
-    none = _route(torch.zeros(4), torch.zeros(4), torch.zeros(4), 1.0, 0.75, 0.5)
-    assert all(x is None for x in none), "no-evidence case must yield None masks (vanilla fallback)"
-    print("PASS routing algebra (partition, disjoint, None when no evidence)")
-
-
-# --------------------------------------------------------------------------- #
-# §7.7 + placement  real GPU densify_and_split                                 #
+# real GPU densify_and_split (vanilla N(0, Sigma) placement)                   #
 # --------------------------------------------------------------------------- #
 def build_model(seed=0, P=48, C=8):
     from arguments import ModelParams, OptimizationParams
@@ -184,53 +122,18 @@ def build_model(seed=0, P=48, C=8):
     return g
 
 
-def _do_split(g, N=2):
-    n = g.get_xyz.shape[0]
-    px = g.get_xyz.detach().clone()
-    ps = g.get_scaling.detach().clone()
-    pr = g.get_rotation.detach().clone()
-    g.densify_and_split(torch.ones((n, 1), device="cuda"), 0.0, 1.0, N=N)  # all eligible
-    return px, ps, pr, g.get_xyz.detach().clone(), g.seg_split_offset_ratio
-
-
 @_needs_cuda
-def test_gpu_split_placement():
-    from utils.general_utils import build_rotation
-
-    px, ps, pr, children, rho = _do_split(build_model(seed=0))
-    R = build_rotation(pr)
-    major_len, major_ix = ps.max(dim=1)
-    K = px.shape[0]
-    assert children.shape[0] == K * 2, f"expected {K * 2} children, got {children.shape[0]}"
-    # Row i of the appended block belongs to parent k = i % K with offset index
-    # j = i // K (this mirrors the .repeat(N,1) tiling used for base/rotation).
-    fracs = torch.linspace(-1.0, 1.0, 2, device="cuda")
-    for i in range(K * 2):
-        k, j = i % K, i // K
-        off = torch.zeros(3, device="cuda")
-        off[major_ix[k]] = fracs[j] * rho * major_len[k]
-        assert torch.allclose(children[i], px[k] + R[k] @ off, atol=1e-4), \
-            f"child {i} (parent {k}, offset {j}) misplaced"
-    print(f"PASS GPU T0 placement ({K} parents -> {children.shape[0]} children, rho={rho})")
-
-
-@_needs_cuda
-def test_t0_determinism():
-    _, _, _, a, _ = _do_split(build_model(seed=0))
-    _, _, _, b, _ = _do_split(build_model(seed=0))
-    assert torch.allclose(a, b), "T0 placement is not deterministic across identical seeds"
-    print("PASS T0 determinism (identical seed -> identical child layout)")
-
-
-@_needs_cuda
-def test_random_ablation_differs():
+def test_gpu_split_child_count():
     g = build_model(seed=0)
-    g.seg_split_deterministic = False
-    _, _, _, rnd, _ = _do_split(g)
-    _, _, _, det, _ = _do_split(build_model(seed=0))
-    assert not torch.allclose(det, rnd), \
-        "seg_split_deterministic=False produced identical children — flag not honored"
-    print("PASS ablation: seg_split_deterministic=False -> stochastic path differs")
+    n = g.get_xyz.shape[0]
+    prune_filter, n_children = g.densify_and_split(
+        torch.ones((n, 1), device="cuda"), 0.0, 1.0, N=2)
+    assert prune_filter.shape[0] == n + 2 * n, \
+        f"prune_filter len {prune_filter.shape[0]} != {3 * n}"
+    assert n_children == 2 * n, f"expected {2 * n} children, got {n_children}"
+    assert g.get_xyz.shape[0] == 3 * n, \
+        f"post-split population {g.get_xyz.shape[0]} != {3 * n}"
+    print(f"PASS GPU split child count ({n} parents -> {n_children} children)")
 
 
 def _run(fn):
@@ -243,14 +146,11 @@ def _run(fn):
 if __name__ == "__main__":
     print("torch", torch.__version__, "cuda", torch.version.cuda)
     _run(test_py_compile_edited_files)
-    _run(test_t0_sources_present_and_wired)
-    _run(test_t1_sources_present_or_skip)
-    _run(test_t0_layout_math)
-    _run(test_routing_mask_algebra)
+    _run(test_sgdense_sources_present_or_skip)
+    _run(test_deterministic_split_removed)
+    _run(test_seg_hist_readout_algebra)
     if not torch.cuda.is_available():
         print("SKIP GPU tests (no CUDA on this host)")
     else:
-        _run(test_gpu_split_placement)
-        _run(test_t0_determinism)
-        _run(test_random_ablation_differs)
+        _run(test_gpu_split_child_count)
     print("ALL DENSIFICATION-PLACEMENT TESTS PASSED")

@@ -1,5 +1,11 @@
 # Proposal: Segmentation-Gated Densification Routing (T0 + T1)
 
+> **SUPERSEDED (2026-10-31).** The quantile-based T1 routing described here was
+> replaced by the SGDense category taxonomy + geometric support test — see
+> `docs/06-sgdense-category-densification.md`. T0 deterministic split placement has
+> been removed entirely (splits use vanilla random `N(0, Σ)`). This document is kept
+> as a design record.
+
 ## 0. Status and scope
 
 **Status:** proposed 2026-10-05. T0 is present on disk but **uncommitted and currently non-runnable** (two defects — see §4.0); T1 is unimplemented. This document is the design of record for both. It **resolves doc 02 §6.1** (the sign conflict) — see §6.

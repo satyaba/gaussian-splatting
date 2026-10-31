@@ -21,6 +21,12 @@ from utils.sh_utils import RGB2SH
 from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
+from sgdense.readout import seg_hist_readout as _seg_hist_readout
+from sgdense.texture import class_freq_thres
+from sgdense.config import DensificationConfig
+
+# Vanilla fallback used when no SGDense config is supplied (all policy off).
+_DEFAULT_CFG = DensificationConfig(lvl1_floaters=False, lvl2_floaters=False)
 
 try:
     from diff_gaussian_rasterization import SparseGaussianAdam
@@ -56,8 +62,6 @@ class GaussianModel:
         self.seg_hist_decay = 1.0                  # beta; overwritten in training_setup
         self.seg_hist_inherit_discount = 1.0       # c; overwritten in training_setup
         self.seg_hist_frozen = False               # warmup: suppress M writes (set via set_gaussian_properties_trainable)
-        self.seg_split_deterministic = True        # T0: overwritten in training_setup
-        self.seg_split_offset_ratio = 0.5          # T0: overwritten in training_setup
         self._xyz = torch.empty(0)
         self._features_dc = torch.empty(0)
         self._features_rest = torch.empty(0)
@@ -227,8 +231,6 @@ class GaussianModel:
         # Persisted [N, C] mass histogram (doc 03 §4.3); decay/inherit knobs live on the model.
         self.seg_hist_decay = training_args.seg_hist_decay
         self.seg_hist_inherit_discount = training_args.seg_hist_inherit_discount
-        self.seg_split_deterministic = training_args.seg_split_deterministic
-        self.seg_split_offset_ratio = training_args.seg_split_offset_ratio
         self.seg_hist = torch.zeros((self.get_xyz.shape[0], self.num_segmentation_classes),
                                     dtype=torch.float32, device="cuda")
 
@@ -515,41 +517,57 @@ class GaussianModel:
     def _pad_mask(mask, n):
         """Regime masks are length P_old. split runs AFTER clone (which appended
         rows at the tail), so a mask handed to split must be padded with False to
-        the new length — a freshly created child is never pre-selected (doc 02 §5).
+        the new length — a freshly created child is never pre-selected.
         None passes through unchanged (vanilla fallback)."""
         if mask is None or mask.shape[0] == n:
             return mask
+
+        if mask.shape[0] > n:
+            raise RuntimeError(
+                f"_pad_mask: mask len {mask.shape[0]} > population {n}; "
+                f"stale/over-remapped mask — layout bug, not a pad case")
         out = torch.zeros(n, dtype=torch.bool, device="cuda")
         out[:mask.shape[0]] = mask
         return out
 
-    def densify_and_split(self, grads, grad_threshold, scene_extent, N=2, sel_mask=None):
+    @staticmethod
+    def _remap_after_split(mask, prune_filter):
+        """Prune keeps the appended children (their slots are False), so ~prune_filter
+        is already the full new ordering (survivors + children). No re-append."""
+        if mask is None:
+            return None
+        return mask[~prune_filter]
+
+    def _gauss_thresh(self, grad_threshold, cfg, s_tilde):
+        """Per-Gaussian gradient threshold. TEXTURE_BASED_THRESH scales the scalar
+        threshold per class via s_tilde; otherwise a scalar broadcast."""
+        if cfg is not None and cfg.texture_based_thresh and s_tilde is not None:
+            new_thresh = torch.tensor(
+                class_freq_thres(grad_threshold, s_tilde, cfg.texture_beta), device='cuda')
+            gauss_class_ids = torch.argmax(self.seg_hist, dim=1)
+            return new_thresh[gauss_class_ids]
+        return grad_threshold
+
+    def densify_and_split(self, grads, grad_threshold, scene_extent, N=2, dense_weight=1,
+                          sel_mask=None, cfg=None, s_tilde=None):
         n_init_points = self.get_xyz.shape[0]
         # Extract points that satisfy the gradient condition
         padded_grad = torch.zeros((n_init_points), device="cuda")
         padded_grad[:grads.shape[0]] = grads.squeeze()
-        selected_pts_mask = torch.where(padded_grad >= grad_threshold, True, False)
+
+        gauss_thresh = self._gauss_thresh(grad_threshold, cfg, s_tilde)
+        selected_pts_mask = torch.where(padded_grad >= gauss_thresh, True, False)
         selected_pts_mask = torch.logical_and(selected_pts_mask,
-                                              torch.max(self.get_scaling, dim=1).values > self.percent_dense*scene_extent)
-        if sel_mask is not None:                                                 # NEW (T1): boundary regime
+                                              torch.max(self.get_scaling, dim=1).values > dense_weight * self.percent_dense*scene_extent)
+        if sel_mask is not None:                                                 # boundary regime
             selected_pts_mask = torch.logical_and(
                 selected_pts_mask, self._pad_mask(sel_mask, n_init_points))
 
-        if self.seg_split_deterministic:
-            sel_scaling = self.get_scaling[selected_pts_mask]
-            K = sel_scaling.shape[0]
-            major_len, major_idx = sel_scaling.max(dim=1)
-            fracs = (torch.linspace(-1.0, 1.0, N, device="cuda") if N > 1 else torch.zeros(1, device="cuda"))
-            offs = torch.zeros((K,N, 3), device="cuda")
-            offs.scatter_(2, major_idx[:, None, None].expand(K, N, 1), (self.seg_split_offset_ratio * major_len)[:, None].mul(fracs[None, :]).unsqueeze(-1))
-            # Match the runtime tiling: base/rotation use .repeat(N,1) so row i
-            # belongs to parent (i % K). Tile the offsets the same way (transpose,
-            # NOT reshape) or children inherit the wrong parent's offset vector.
-            samples = offs.transpose(0, 1).reshape(K * N, 3)
-        else:
-            stds = self.get_scaling[selected_pts_mask].repeat(N,1)
-            means =torch.zeros((stds.size(0), 3),device="cuda")
-            samples = torch.normal(mean=means, std=stds)
+        # Vanilla split placement: children sampled from N(0, Sigma) in the
+        # parent's local frame (standard 3DGS).
+        stds = self.get_scaling[selected_pts_mask].repeat(N,1)
+        means =torch.zeros((stds.size(0), 3),device="cuda")
+        samples = torch.normal(mean=means, std=stds)
 
         rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N,1,1)
         new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[selected_pts_mask].repeat(N, 1)
@@ -565,14 +583,24 @@ class GaussianModel:
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_seg_encoding, new_tmp_radii, new_seg_hist)
 
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
-        self.prune_points(prune_filter)
+        n_children = int(new_xyz.shape[0])
 
-    def densify_and_clone(self, grads, grad_threshold, scene_extent, sel_mask=None):
+        self.prune_points(prune_filter)
+        return prune_filter, n_children
+
+    def densify_and_clone(self, grads, grad_threshold, scene_extent, dense_weight=1,
+                          sel_mask=None, cfg=None, s_tilde=None):
         # Extract points that satisfy the gradient condition
-        selected_pts_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
+        n_init_points = self.get_xyz.shape[0]
+
+        padded_grad = torch.zeros((n_init_points), device="cuda")
+        padded_grad[:grads.shape[0]] = torch.norm(grads, dim=-1).squeeze()
+
+        gauss_thresh = self._gauss_thresh(grad_threshold, cfg, s_tilde)
+        selected_pts_mask = padded_grad >= gauss_thresh
         selected_pts_mask = torch.logical_and(selected_pts_mask,
-                                              torch.max(self.get_scaling, dim=1).values <= self.percent_dense*scene_extent)
-        if sel_mask is not None:                                                 # NEW (T1): interior regime
+                                              torch.max(self.get_scaling, dim=1).values <= dense_weight * self.percent_dense*scene_extent)
+        if sel_mask is not None:                                                 # interior regime
             selected_pts_mask = torch.logical_and(selected_pts_mask, sel_mask)
 
         new_xyz = self._xyz[selected_pts_mask]
@@ -589,24 +617,59 @@ class GaussianModel:
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_seg_encoding, new_tmp_radii, new_seg_hist)
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, radii,
-                          clone_mask=None, split_mask=None, floater_mask=None):
+                          cfg=None, s_tilde=None,
+                          interior_mask=None, boundary_mask=None, floater_mask=None, other_mask=None):
+        cfg = cfg if cfg is not None else _DEFAULT_CFG
         self.tmp_radii = radii                       # set BEFORE prune_points (it prunes tmp_radii)
 
         # floater -> prune FIRST, while every mask is index-aligned to the
         # pre-densification population (P_old). Subsetting the survivor masks by
-        # ~floater keeps clone/split aligned across the removal, without having to
-        # remap indices past split's own parent-removal.
+        # ~floater keeps clone/split aligned across the removal.
         if floater_mask is not None:
             self.prune_points(floater_mask)
             keep = ~floater_mask
-            clone_mask = clone_mask[keep] if clone_mask is not None else None
-            split_mask = split_mask[keep] if split_mask is not None else None
+            interior_mask = interior_mask[keep] if interior_mask is not None else None
+            boundary_mask = boundary_mask[keep] if boundary_mask is not None else None
+            other_mask = other_mask[keep] if other_mask is not None else None
 
         grads = self.xyz_gradient_accum / self.denom   # recomputed: the prune above changed the length
         grads[grads.isnan()] = 0.0
 
-        self.densify_and_clone(grads, max_grad, extent, sel_mask=clone_mask)   # interior -> clone
-        self.densify_and_split(grads, max_grad, extent, sel_mask=split_mask)   # boundary -> split
+        if cfg.position_based_thresh:
+            regimes = {                                  # name -> (mask, scaling_threshold)
+                "interior": (interior_mask, cfg.interior_weight),
+                "boundary": (boundary_mask, cfg.boundary_weight),
+                "other":    (other_mask, cfg.other_weight),
+            }
+
+            for m, t in regimes.values():
+                if m is None:
+                    continue
+                m = self._pad_mask(m, self.get_xyz.shape[0])
+                self.densify_and_clone(grads, max_grad, extent,
+                                       dense_weight=t, sel_mask=m, cfg=cfg, s_tilde=s_tilde)
+
+            # SPLITS second. Each split removes its parents, shifting indices, so
+            # every not-yet-run sibling mask is remapped onto the new ordering.
+            names = list(regimes.keys())
+            for i, name in enumerate(names):
+                m, t = regimes[name]
+                if m is None:
+                    continue
+                m = self._pad_mask(m, self.get_xyz.shape[0])
+                prune_filter, n_children = self.densify_and_split(
+                    grads, max_grad, extent, dense_weight=t, sel_mask=m, cfg=cfg, s_tilde=s_tilde)
+                for rest in names[i + 1:]:
+                    rm, rt = regimes[rest]
+                    if rm is None:
+                        continue
+                    rm = self._pad_mask(rm, prune_filter.shape[0])
+                    regimes[rest] = (self._remap_after_split(rm, prune_filter), rt)
+        else:
+            self.densify_and_clone(grads, max_grad, extent,
+                                   dense_weight=1, cfg=cfg, s_tilde=s_tilde)
+            prune_filter, n_children = self.densify_and_split(
+                grads, max_grad, extent, dense_weight=1, cfg=cfg, s_tilde=s_tilde)
 
         prune_mask = (self.get_opacity < min_opacity).squeeze()
         if max_screen_size:
@@ -620,27 +683,16 @@ class GaussianModel:
 
     @torch.no_grad()
     def seg_hist_readout(self, eps=1e-8):
-        """Read-outs from the persisted mass histogram M (doc 03 §3.2).
+        """Read-outs from the persisted mass histogram M (sgdense.readout).
 
-        Returns (consistency, structure, disagree, S), each [N]:
-          consistency = max_c P[g, c]     (replaces the old top1/tot proxy)
-          structure   = P_(1) + P_(2)     (boundary-ness)
-          disagree    = 1 - P_(1)
-          S           = sum_c M[g, c]     (evidence = mass, NOT count)
+        Returns (consistency, structure, disagree, entropy, top2, S).
         Rows with S == 0 give P == 0, so their 'disagree' looks maximal — gate
         them out with S (`S > seg_hist_min_evidence`), never with disagree.
         """
         if self.seg_hist.numel() == 0:
             z = torch.zeros((self.get_xyz.shape[0],), device="cuda")
-            return z, z, z, z
-        S = self.seg_hist.sum(dim=1)
-        P = self.seg_hist / S.clamp_min(eps).unsqueeze(1)
-        k = min(2, P.shape[1])
-        top2 = torch.topk(P, k=k, dim=1).values
-        consistency = top2[:, 0]
-        structure = top2[:, 0] + top2[:, 1] if k == 2 else top2[:, 0]
-        disagree = 1.0 - top2[:, 0]
-        return consistency, structure, disagree, S
+            return z, z, z, z, torch.zeros((self.get_xyz.shape[0], 0), device="cuda"), z
+        return _seg_hist_readout(self.seg_hist, eps=eps)
 
     def add_densification_stats(self, viewspace_point_tensor, update_filter):
         self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)

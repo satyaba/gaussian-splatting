@@ -1,5 +1,10 @@
 # 05 — Running THE SPIKE (doc 04 §7.5 item 5 / §7.6 calibration)
 
+> **SUPERSEDED (2026-10-31).** T1 quantile routing was replaced by the SGDense
+> category taxonomy + geometric support test — see
+> `docs/06-sgdense-category-densification.md`. This doc is kept as a design record;
+> `spike_route.py` still runs but targets the retired `(disagree, structure)` split.
+
 **Purpose.** The decisive, GPU-gated test that decides whether T1
 (segmentation-gated densification routing) may be enabled at all. It answers one
 question: *does the model's persisted belief `(disagree, structure)` actually

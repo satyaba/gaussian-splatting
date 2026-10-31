@@ -10,6 +10,8 @@
 #
 
 import os
+import json
+import numpy as np
 import torch
 from random import randint
 from utils.loss_utils import l1_loss, ssim
@@ -19,11 +21,13 @@ from scene import Scene, GaussianModel
 from scene.gaussian_model import save_seg_hist
 from scene.segmentation_decoder import SegmentationDecoder, save_decoder_checkpoint, load_decoder_checkpoint
 from utils.general_utils import safe_state, get_expon_lr_func
+from sgdense.config import DensificationConfig
+from sgdense.categories import generate_category_masks
 import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr
 from argparse import ArgumentParser, Namespace
-from arguments import ModelParams, PipelineParams, OptimizationParams
+from arguments import ModelParams, PipelineParams, OptimizationParams, SGDenseParams
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_FOUND = True
@@ -42,10 +46,55 @@ try:
 except:
     SPARSE_ADAM_AVAILABLE = False
 
-def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
+def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
 
     if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
         sys.exit(f"Trying to use sparse adam but it is not installed, please install the correct rasterizer using pip install [3dgs_accel].")
+
+    # SGDense densification policy (run26 methodology), carried explicitly so the
+    # GaussianModel lifecycle holds no global state.
+    cfg = DensificationConfig(
+        lvl1_floaters=sgdense.lvl1_floaters,
+        lvl2_floaters=sgdense.lvl2_floaters,
+        position_based_thresh=sgdense.position_based_thresh,
+        texture_based_thresh=sgdense.texture_based_thresh,
+        interior_weight=sgdense.interior_weight,
+        boundary_weight=sgdense.boundary_weight,
+        other_weight=sgdense.other_weight,
+        texture_beta=sgdense.texture_beta,
+        tau_p1=sgdense.tau_p1,
+        tau_p2_high=sgdense.tau_p2_high,
+        tau_entropy_low=sgdense.tau_entropy_low,
+        tau_entropy_high=sgdense.tau_entropy_high,
+        tau_tail_high=sgdense.tau_tail_high,
+        floater_opacity_thres=sgdense.floater_opacity_thres,
+        grid_target=sgdense.grid_target,
+        knn_k=sgdense.knn_k,
+        knn_kmin=sgdense.knn_kmin,
+        knn_m=sgdense.knn_m,
+        holdout_frac=sgdense.holdout_frac,
+        thin_ratio_div=sgdense.thin_ratio_div,
+    )
+
+    # Per-class texture score for TEXTURE_BASED_THRESH: load the cached s_tilde
+    # from the model dir, else compute it from the dataset and cache it.
+    s_tilde = None
+    if cfg.texture_based_thresh:
+        s_tilde_path = os.path.join(dataset.model_path, "s_tilde.npy")
+        if os.path.exists(s_tilde_path):
+            s_tilde = np.load(s_tilde_path)
+            print(f"[SGDense] loaded texture scores from {s_tilde_path}")
+        else:
+            from sgdense.texture import compute_texture_freq
+            scene_dir = os.path.join(dataset.source_path, dataset.images)
+            s_tilde, _k, _prior, _pc = compute_texture_freq(
+                scene_dir, dataset.segmentation_path, dataset.num_segmentation_classes,
+                erode=sgdense.tex_erode, min_px=sgdense.tex_min_px, min_views=sgdense.tex_min_views,
+                k=None if sgdense.tex_k <= 0 else sgdense.tex_k, step=sgdense.tex_step,
+                no_illum_norm=sgdense.tex_no_illum_norm, blur_sigma=sgdense.tex_blur_sigma)
+            os.makedirs(dataset.model_path, exist_ok=True)
+            np.save(s_tilde_path, s_tilde)
+            print(f"[SGDense] computed texture scores -> {s_tilde_path}")
 
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
@@ -133,7 +182,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             gaussians.set_gaussian_properties_trainable(True)
 
         # Every 1000 its we increase the levels of SH up to a maximum degree
-        if iteration % 1000 == 0 and iteration > opt.seg_warmup_iters:
+        if iteration % 1000 == 0:
             gaussians.oneupSHdegree()
 
         # Pick a random Camera
@@ -165,8 +214,18 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         else:
             ssim_value = ssim(image, gt_image)
 
-        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
-        photo_loss_value = loss.item()   # unweighted photometric objective, for seg/photo ratio
+        # SGDense photo-weight ramp: the photo term is suppressed during the seg
+        # warmup, then ramps back to full weight over ~10x the warmup length.
+        photo_weight = 0.0
+        if iteration > opt.seg_warmup_iters:
+            new_ph_weight = (iteration // opt.seg_warmup_iters) / 10
+            photo_weight = new_ph_weight if new_ph_weight <= 1.0 else 1.0
+        if tb_writer:
+            tb_writer.add_scalar("L_photo weight", photo_weight, iteration)
+
+        photo_loss_t = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+        photo_loss_value = photo_loss_t.item()   # unweighted photometric objective, for seg/photo ratio
+        loss = photo_weight * photo_loss_t
 
         # Depth regularization
         Ll1depth_pure = 0.0
@@ -245,30 +304,43 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
 
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
-                    # doc 03 §4.4: read M BEFORE any lifecycle call — densification
-                    # mutates population and M in lockstep, so this must come first.
-                    consistency, structure, disagree, S = gaussians.seg_hist_readout()
+                    # Read M BEFORE any lifecycle call — densification mutates the
+                    # population and M in lockstep, so this must come first.
+                    consistency, structure, disagree, entropy, top2, S = gaussians.seg_hist_readout()
                     if tb_writer:
                         tb_writer.add_histogram("seg/consistency", consistency, iteration)
                         tb_writer.add_histogram("seg/structure", structure, iteration)
                         tb_writer.add_histogram("seg/disagree", disagree, iteration)
+                        tb_writer.add_histogram("seg/entropy", entropy, iteration)
                         tb_writer.add_histogram("seg/evidence_S", S, iteration)
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
 
-                    clone_mask = split_mask = floater_mask = None
-                    if opt.seg_route_enabled:
-                        act = S > opt.seg_hist_min_evidence
-                        if bool(act.any()):
-                            tau_d = torch.quantile(disagree[act], opt.seg_q_disagree)
-                            tau_s = torch.quantile(structure[act], opt.seg_q_structure)
-                            clone_mask   = act & (disagree <  tau_d)
-                            split_mask   = act & (disagree >= tau_d) & (structure >= tau_s)
-                            floater_mask = act & (disagree >= tau_d) & (structure <  tau_s)
-                        # else: no evidence -> all None -> vanilla fallback
+                    opacities = gaussians.get_opacity.squeeze(1)
+                    gauss_xyz = gaussians.get_xyz
+
+                    interior_mask = boundary_mask = floaters_mask = other_mask = None
+                    if cfg.lvl1_floaters or cfg.lvl2_floaters or cfg.position_based_thresh:
+                        (unobserved_mask, default_mask, interior_mask, floaters_mask,
+                         ambiguous_mask, boundary_mask) = generate_category_masks(
+                            opacities.shape[0], top2, S, entropy, gauss_xyz, opacities,
+                            cfg.floater_opacity_thres, opt.seg_hist_min_evidence, cfg)
+                        other_mask = default_mask | ambiguous_mask
+
+                    # Floaters are applied only when BOTH floater levels are on (run26
+                    # gating); POSITION_BASED_THRESH supplies the clone/split regimes.
+                    floaters_mask_t = None
+                    interior_mask_t = boundary_mask_t = other_mask_t = None
+                    if cfg.lvl1_floaters and cfg.lvl2_floaters:
+                        floaters_mask_t = torch.tensor(floaters_mask, device='cuda')
+                        if cfg.position_based_thresh:
+                            interior_mask_t = torch.tensor(interior_mask, device='cuda')
+                            boundary_mask_t = torch.tensor(boundary_mask, device='cuda')
+                            other_mask_t = torch.tensor(other_mask, device='cuda')
 
                     gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent,
-                                                size_threshold, radii,
-                                                clone_mask=clone_mask, split_mask=split_mask, floater_mask=floater_mask)
+                                                size_threshold, radii, cfg=cfg, s_tilde=s_tilde,
+                                                interior_mask=interior_mask_t, boundary_mask=boundary_mask_t,
+                                                floater_mask=floaters_mask_t, other_mask=other_mask_t)
 
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                     gaussians.reset_opacity()
@@ -291,6 +363,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
                 save_decoder_checkpoint(decoder, decoder_optimizer, iteration, scene.model_path + f"/decoder{iteration}.pth")
+
+    # Persist the densification policy for reproducibility / downstream scripts.
+    with open(os.path.join(dataset.model_path, "experiment_config.json"), "w") as f:
+        json.dump(cfg.to_dict(), f, indent=1)
+    if tb_writer:
+        tb_writer.flush()
+        tb_writer.close()
 
 def prepare_output_and_logger(args):
     if not args.model_path:
@@ -360,6 +439,12 @@ if __name__ == "__main__":
     lp = ModelParams(parser)
     op = OptimizationParams(parser)
     pp = PipelineParams(parser)
+    sp = SGDenseParams(parser)
+    # Negations for the SGDense bools that default True (ParamGroup only emits
+    # store_true, which cannot turn a default-True flag off).
+    parser.add_argument('--no_lvl1_floaters', action='store_false', dest='lvl1_floaters')
+    parser.add_argument('--no_lvl2_floaters', action='store_false', dest='lvl2_floaters')
+    parser.add_argument('--no_tex_no_illum_norm', action='store_false', dest='tex_no_illum_norm')
     parser.add_argument('--ip', type=str, default="127.0.0.1")
     parser.add_argument('--port', type=int, default=6009)
     parser.add_argument('--debug_from', type=int, default=-1)
@@ -382,7 +467,7 @@ if __name__ == "__main__":
     if not args.disable_viewer:
         network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
-    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
+    training(lp.extract(args), op.extract(args), pp.extract(args), sp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
 
     # All done
     print("\nTraining complete.")

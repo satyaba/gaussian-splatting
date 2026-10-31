@@ -102,7 +102,7 @@ class OptimizationParams(ParamGroup):
         self.random_background = False
         self.optimizer_type = "default"
         self.seg_encoding_lr = 0.0025
-        self.seg_warmup_iters = 10_000
+        self.seg_warmup_iters = 2_000          # SGDense run26 default
         self.decoder_lr_init = 0.001
         self.decoder_lr_final = 0.0001
         self.decoder_lr_decay_start = 7_000   # < seg_warmup_iters: decay begins before warmup ends (open tuning item)
@@ -111,12 +111,50 @@ class OptimizationParams(ParamGroup):
         self.seg_hist_decay = 0.99             # beta: exponential decay per iteration (§6.3)
         self.seg_hist_min_evidence = 1.0       # S gate, mass not count (§6.5)
         self.seg_hist_inherit_discount = 0.5   # c: M_child = c * M_parent at densify (§6.1)
-        self.seg_split_deterministic = True     # T0: children at fixed +/- offsets (False = vanilla N(0,Sigma))
-        self.seg_split_offset_ratio = 0.5       # rho: children at +/- rho * major-axis length
-        self.seg_route_enabled = False
-        self.seg_q_disagree = 0.75      # Threshold (quantile) for disagree
-        self.seg_q_structure = 0.50
         super().__init__(parser, "Optimization Parameters")
+
+class SGDenseParams(ParamGroup):
+    """SGDense segmentation-guided density control (run26 methodology).
+
+    Route switches, category thresholds (TAU_*), and the geometric support
+    test parameters. Bools defaulting True carry explicit --no_* negations
+    registered in train.py (ParamGroup only emits store_true).
+    """
+    def __init__(self, parser):
+        # --- route switches ---
+        self.lvl1_floaters = True
+        self.lvl2_floaters = True
+        self.position_based_thresh = False
+        self.texture_based_thresh = False
+        # --- POSITION_BASED_THRESH per-regime scaling-threshold weights ---
+        self.interior_weight = 1.0
+        self.boundary_weight = 0.5
+        self.other_weight = 1.0
+        # --- TEXTURE_BASED_THRESH ---
+        self.texture_beta = 0.5
+        # --- category thresholds (TAU_*) ---
+        self.tau_p1 = 0.85
+        self.tau_p2_high = 0.25
+        self.tau_entropy_low = 0.25
+        self.tau_entropy_high = 1.5
+        self.tau_tail_high = 0.25
+        self.floater_opacity_thres = 0.501
+        # --- geometric support test (reach/height) ---
+        self.grid_target = 8
+        self.knn_k = 12
+        self.knn_kmin = 6
+        self.knn_m = 32
+        self.holdout_frac = 0.10
+        self.thin_ratio_div = 3.0
+        # --- texture-frequency solver (TEXTURE_BASED_THRESH) ---
+        self.tex_erode = 3
+        self.tex_min_px = 500
+        self.tex_min_views = 3
+        self.tex_k = -1          # <=0 means "auto" (25th pct of pixel counts)
+        self.tex_step = 1
+        self.tex_no_illum_norm = True
+        self.tex_blur_sigma = 1.0
+        super().__init__(parser, "SGDense Parameters")
 
 def get_combined_args(parser : ArgumentParser):
     cmdlne_string = sys.argv[1:]
