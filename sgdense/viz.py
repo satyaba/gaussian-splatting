@@ -439,3 +439,113 @@ def show_lineage(log, gid: int, max_print: int = 60):
     print("ancestors  :", up)
     print("descendants:", down[:max_print] + (["..."] if len(down) > max_print else []))
     return up, down
+
+
+# ------------------------------------------------------------------ Plotly 3D
+def _cat_pts(arrays) -> np.ndarray:
+    arrays = [a for a in arrays if a is not None and len(a)]
+    return np.concatenate(arrays, 0) if arrays else np.zeros((0, 3), dtype=np.float32)
+
+
+def _event_traces(e: Dict[str, Any], size: float = 3.0):
+    """Five Scatter3d traces for one event (clone/split parents+children, pruned)."""
+    import plotly.graph_objects as go
+
+    cp = _cat_pts([_t(x["parent_xyz"]) for x in e["clone"]])
+    cc = _cat_pts([_t(x["child_xyz"]) for x in e["clone"]])
+    sp = _cat_pts([_t(x["parent_xyz"]) for x in e["split"]])
+    sc = _cat_pts([_t(x["child_xyz"]) for x in e["split"]])
+    pr = _cat_pts([_t(x["xyz"]) for x in e["prune"]])
+
+    def mk(P, name, color, symbol, opacity=0.9):
+        return go.Scatter3d(
+            x=P[:, 0], y=P[:, 1], z=P[:, 2], mode="markers", name=name,
+            marker=dict(size=size, color=color, symbol=symbol, opacity=opacity),
+            hoverinfo="name")
+
+    return [
+        mk(cp, "clone parent", C_CLONE, "circle", 1.0),
+        mk(cc, "clone child", C_CLONE, "x", 0.8),
+        mk(sp, "split parent", C_SPLIT, "diamond", 1.0),
+        mk(sc, "split child", C_SPLIT, "x", 0.8),
+        mk(pr, "pruned", C_PRUNE, "cross", 1.0),
+    ]
+
+
+def plotly_replay(log, background_xyz=None, max_bg: int = 8000, size: float = 3.0,
+                  bg_size: float = 1.2, bg_color: str = "#bdbdbd", show_bg: bool = True,
+                  path: Optional[str] = None, height: int = 700,
+                  title: str = "SGDense densification \u2014 per-iteration 3D viewer"):
+    """Interactive Plotly 3D viewer over every event in the log.
+
+    Rotate / zoom freely, then drag the slider (or press *play*) to step through
+    the densification iterations.  Affected Gaussians keep the usual colours
+    (clone = cyan, split = orange, pruned = red) over a neutral grey background.
+
+    Call ``fig.show()`` inline, or pass ``path="viewer.html"`` to write a
+    portable file that opens in any browser without Python/Colab.
+    """
+    try:
+        import plotly.graph_objects as go
+    except ImportError as exc:  # pragma: no cover
+        raise ImportError("plotly is required for plotly_replay -- `pip install plotly`") from exc
+
+    events = log.events
+    if not events:
+        print("no events to plot")
+        return None
+
+    # fixed axis ranges across every highlighted point (+ background)
+    pts = _collect_xyz(events)
+    if background_xyz is not None:
+        b = _t(background_xyz)
+        pts = b if pts is None else np.concatenate([pts, b], 0)
+    if pts is not None and len(pts):
+        lo = np.percentile(pts, 1, axis=0)
+        hi = np.percentile(pts, 99, axis=0)
+        pad = 0.05 * np.maximum(hi - lo, 1e-6)
+        axes = [dict(range=[float(lo[i] - pad[i]), float(hi[i] + pad[i])]) for i in range(3)]
+    else:
+        axes = [{}, {}, {}]
+
+    ev_traces = _event_traces(events[0], size=size)
+    base = []
+    if show_bg and background_xyz is not None:
+        b = _t(background_xyz)
+        b = b[::max(1, len(b) // max_bg)]
+        base.append(go.Scatter3d(
+            x=b[:, 0], y=b[:, 1], z=b[:, 2], mode="markers",
+            marker=dict(size=bg_size, color=bg_color, opacity=0.35),
+            name="other Gaussians", hoverinfo="skip"))
+    base += ev_traces
+    ev_idx = list(range(len(base) - len(ev_traces), len(base)))
+
+    frames = [go.Frame(data=_event_traces(e, size=size), traces=ev_idx, name=str(e["iter"]))
+              for e in events]
+    steps = [dict(method="animate", label=str(e["iter"]),
+                  args=[[str(e["iter"])],
+                        dict(mode="immediate",
+                             frame=dict(duration=0, redraw=True),
+                             transition=dict(duration=0))])
+             for e in events]
+
+    fig = go.Figure(data=base, frames=frames)
+    fig.update_layout(
+        title=title, height=height, margin=dict(l=0, r=0, t=60, b=0),
+        scene=dict(xaxis=axes[0], yaxis=axes[1], zaxis=axes[2], aspectmode="data"),
+        sliders=[dict(active=0, currentvalue=dict(prefix="iteration: "),
+                      pad=dict(t=30), steps=steps)],
+        updatemenus=[dict(
+            type="buttons", showactive=False, x=0.05, y=1.12, xanchor="left",
+            buttons=[
+                dict(label="\u25b6 play", method="animate",
+                     args=[None, dict(frame=dict(duration=250, redraw=True),
+                                      fromcurrent=True, transition=dict(duration=0))]),
+                dict(label="\u275a\u275a pause", method="animate",
+                     args=[[None], dict(mode="immediate", redraw=False,
+                                        transition=dict(duration=0))]),
+            ])],
+    )
+    if path is not None:
+        fig.write_html(path, include_plotlyjs="cdn")
+    return fig

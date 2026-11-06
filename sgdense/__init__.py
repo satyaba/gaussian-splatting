@@ -33,6 +33,7 @@ from sgdense.viz import (
     LiveDensifier3D,
     replay,
     animate_replay,
+    plotly_replay,
     build_family_index,
     show_lineage,
 )
@@ -62,6 +63,7 @@ __all__ = [
     "LiveDensifier3D",
     "replay",
     "animate_replay",
+    "plotly_replay",
     "build_family_index",
     "show_lineage",
 ]
