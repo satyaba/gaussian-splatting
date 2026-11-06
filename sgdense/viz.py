@@ -26,6 +26,9 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import torch
 
+# convenience re-export: the saved log is loaded through this module too
+from sgdense.densify_tracker import TrackerLog, load_events
+
 C_ORIG = "#9ca3af"
 C_CLONE = "#22d3ee"
 C_SPLIT = "#fb923c"
