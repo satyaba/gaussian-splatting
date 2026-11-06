@@ -30,6 +30,8 @@ from sgdense.viz import (
     draw_event_3d,
     plot_event_3d,
     show_event,
+    LiveDensifier3D,
+    replay,
     build_family_index,
     show_lineage,
 )
@@ -56,6 +58,8 @@ __all__ = [
     "draw_event_3d",
     "plot_event_3d",
     "show_event",
+    "LiveDensifier3D",
+    "replay",
     "build_family_index",
     "show_lineage",
 ]

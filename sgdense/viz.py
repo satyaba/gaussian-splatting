@@ -225,6 +225,102 @@ def show_event(log, iteration: int, background_xyz=None, figsize=(15, 7)):
     return fig
 
 
+# --------------------------------------------------------------------- live 3D
+class LiveDensifier3D:
+    """Live 3D view updated at every densification event.
+
+    Affected Gaussians are highlighted -- **clone = cyan**, **split = orange**,
+    **pruned = red** -- and all other Gaussians are drawn in neutral grey.
+
+    Designed to be updated from inside the training loop (pass the *current*
+    ``gaussians.get_xyz``), but works just as well offline via :func:`replay`.
+    A matplotlib 3D redraw is the bottleneck, so the background is decimated to
+    ``max_bg`` points and the view can auto-rotate for a "process" feel.
+    """
+
+    def __init__(self, figsize=(8, 8), max_bg=8000, s_bg=1, s=14, show_bg=True,
+                 rotate=True, azim_step=2.0, elev=25, azim=45, bg_color="#c7c7c7"):
+        plt, _ = _mpl()
+        self.plt = plt
+        self.fig = plt.figure(figsize=figsize)
+        self.ax = self.fig.add_subplot(projection="3d")
+        self.max_bg = max_bg
+        self.s_bg = s_bg
+        self.s = s
+        self.show_bg = show_bg
+        self.rotate = rotate
+        self.azim_step = azim_step
+        self.elev = elev
+        self.azim = azim
+        self.bg_color = bg_color
+        self._lims = None
+        self._handle = None
+        self._display()
+
+    def _display(self):
+        try:
+            from IPython.display import display
+            self._handle = display(self.fig, display_id=True)
+        except Exception:                       # plain python / non-notebook use
+            self._handle = None
+
+    def _set_limits(self, xyz):
+        if self._lims is None and xyz is not None:
+            a = _t(xyz)
+            lo = np.percentile(a, 1, axis=0)
+            hi = np.percentile(a, 99, axis=0)
+            pad = 0.05 * np.maximum(hi - lo, 1e-6)
+            self._lims = [(float(lo[i] - pad[i]), float(hi[i] + pad[i])) for i in range(3)]
+        if self._lims is not None:
+            self.ax.set_xlim(*self._lims[0])
+            self.ax.set_ylim(*self._lims[1])
+            self.ax.set_zlim(*self._lims[2])
+
+    def update(self, event: Dict[str, Any], all_xyz=None, save_path: Optional[str] = None):
+        """Redraw for one event.  ``all_xyz`` is the *current* Gaussian centers."""
+        ax = self.ax
+        ax.clear()
+        if self.show_bg and all_xyz is not None:
+            bg = _t(all_xyz)
+            bg = bg[::max(1, len(bg) // self.max_bg)]
+            if len(bg):
+                ax.scatter(bg[:, 0], bg[:, 1], bg[:, 2], s=self.s_bg,
+                           c=self.bg_color, depthshade=False, linewidths=0)
+        draw_event_3d(ax, event, background_xyz=None, s=self.s)
+        if self.rotate:
+            self.azim = (self.azim + self.azim_step) % 360
+        ax.view_init(elev=self.elev, azim=self.azim)
+        self._set_limits(all_xyz)
+        ax.set_title(f"iter {event['iter']}   clone={n_clone(event)}  "
+                     f"split={n_split(event)}  prune={n_prune(event)}")
+        ax.set_axis_off()
+        self.fig.canvas.draw()
+        if self._handle is not None:
+            self._handle.update(self.fig)
+        if save_path is not None:
+            self.fig.savefig(save_path, dpi=120, bbox_inches="tight")
+        return self.fig
+
+    def close(self):
+        self.plt.close(self.fig)
+
+
+def replay(log, background_xyz=None, delay: float = 0.05, **kwargs):
+    """Animate every logged event with :class:`LiveDensifier3D`.
+
+    Runs offline (no model needed) -- useful to re-watch a run saved in
+    ``densify_events.pt``.  ``background_xyz`` is an optional static context
+    cloud; pass ``None`` to show only the highlighted Gaussians.
+    """
+    import time
+    live = LiveDensifier3D(**kwargs)
+    for e in log.events:
+        live.update(e, background_xyz)
+        if delay:
+            time.sleep(delay)
+    return live
+
+
 # ----------------------------------------------------------------------- lineage
 def build_family_index(log) -> Tuple[Dict[int, int], Dict[int, List[int]]]:
     """Return ``(parent_of, children_of)`` maps over all logged events."""
