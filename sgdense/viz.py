@@ -305,13 +305,94 @@ class LiveDensifier3D:
         self.plt.close(self.fig)
 
 
-def replay(log, background_xyz=None, delay: float = 0.05, **kwargs):
-    """Animate every logged event with :class:`LiveDensifier3D`.
+def _collect_xyz(events) -> Optional[np.ndarray]:
+    """Concatenate every highlighted point across all events (for auto-framing)."""
+    chunks = []
+    for e in events:
+        for key in ("clone", "split"):
+            for x in e[key]:
+                chunks.append(_t(x["parent_xyz"]))
+                chunks.append(_t(x["child_xyz"]))
+        for x in e["prune"]:
+            chunks.append(_t(x["xyz"]))
+    return np.concatenate(chunks, 0) if chunks else None
 
-    Runs offline (no model needed) -- useful to re-watch a run saved in
-    ``densify_events.pt``.  ``background_xyz`` is an optional static context
-    cloud; pass ``None`` to show only the highlighted Gaussians.
+
+def animate_replay(log, out_path=None, background_xyz=None, fps: int = 10, dpi: int = 120,
+                   max_bg: int = 8000, s: int = 14, s_bg: int = 1, show_bg: bool = True,
+                   rotate: bool = True, azim_step: float = 2.0, elev: float = 25,
+                   azim: float = 45, bg_color: str = "#c7c7c7", figsize=(8, 8), writer=None):
+    """Build a matplotlib animation over all logged events.
+
+    If ``out_path`` is given it is saved as a video/GIF (``.mp4`` requires
+    ffmpeg -- present on Colab; ``.gif`` uses Pillow and works everywhere) and
+    ``(anim, fig)`` is returned.  Inline you can also do
+    ``anim.to_jshtml()`` (no ffmpeg needed).
     """
+    plt, _ = _mpl()
+    import matplotlib.animation as animation
+
+    events = log.events
+    fig = plt.figure(figsize=figsize)
+    ax = fig.add_subplot(projection="3d")
+
+    # fixed framing so the camera does not jump between frames
+    pts = _collect_xyz(events)
+    if background_xyz is not None:
+        bg = _t(background_xyz)
+        pts = bg if pts is None else np.concatenate([pts, bg], 0)
+    if pts is not None and len(pts):
+        lo = np.percentile(pts, 1, axis=0)
+        hi = np.percentile(pts, 99, axis=0)
+        pad = 0.05 * np.maximum(hi - lo, 1e-6)
+        lims = [(float(lo[i] - pad[i]), float(hi[i] + pad[i])) for i in range(3)]
+    else:
+        lims = None
+
+    state = {"azim": azim}
+
+    def frame(i):
+        e = events[i]
+        ax.clear()
+        if show_bg and background_xyz is not None:
+            b = _t(background_xyz)
+            b = b[::max(1, len(b) // max_bg)]
+            if len(b):
+                ax.scatter(b[:, 0], b[:, 1], b[:, 2], s=s_bg, c=bg_color,
+                           depthshade=False, linewidths=0)
+        draw_event_3d(ax, e, background_xyz=None, s=s)
+        if rotate:
+            state["azim"] = (state["azim"] + azim_step) % 360
+        ax.view_init(elev=elev, azim=state["azim"])
+        if lims is not None:
+            ax.set_xlim(*lims[0])
+            ax.set_ylim(*lims[1])
+            ax.set_zlim(*lims[2])
+        ax.set_title(f"iter {e['iter']}   clone={n_clone(e)}  "
+                     f"split={n_split(e)}  prune={n_prune(e)}")
+        ax.set_axis_off()
+        return (ax,)
+
+    anim = animation.FuncAnimation(fig, frame, frames=len(events),
+                                   interval=1000 / max(fps, 1), blit=False)
+    if out_path is not None:
+        anim.save(out_path, fps=fps, dpi=dpi, writer=writer)
+    return anim, fig
+
+
+def replay(log, background_xyz=None, delay: float = 0.05, **kwargs):
+    """Animate every logged event.
+
+    Default: inline live loop via :class:`LiveDensifier3D`.  Pass
+    ``out_path="..."`` to write a video/GIF instead (mp4 needs ffmpeg, gif uses
+    Pillow); then the return value is a matplotlib ``Animation``.  Extra kwargs
+    (``fps``, ``dpi``, ``max_bg``, ``s``, ``elev``, ``figsize`` ...) are forwarded.
+    """
+    out_path = kwargs.pop("out_path", None)
+    if out_path is not None:
+        anim, _ = animate_replay(log, out_path=out_path,
+                                 background_xyz=background_xyz, **kwargs)
+        return anim
     import time
     live = LiveDensifier3D(**kwargs)
     for e in log.events:
