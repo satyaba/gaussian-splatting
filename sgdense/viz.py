@@ -277,11 +277,16 @@ class LiveDensifier3D:
             self.ax.set_zlim(*self._lims[2])
 
     def update(self, event: Dict[str, Any], all_xyz=None, save_path: Optional[str] = None):
-        """Redraw for one event.  ``all_xyz`` is the *current* Gaussian centers."""
+        """Redraw for one event.
+
+        Uses the event's own ``all_xyz`` snapshot when present, else the
+        ``all_xyz`` argument (e.g. the live ``gaussians.get_xyz``).
+        """
         ax = self.ax
+        bg_src = event.get("all_xyz", all_xyz)
         ax.clear()
-        if self.show_bg and all_xyz is not None:
-            bg = _t(all_xyz)
+        if self.show_bg and bg_src is not None:
+            bg = _t(bg_src)
             bg = bg[::max(1, len(bg) // self.max_bg)]
             if len(bg):
                 ax.scatter(bg[:, 0], bg[:, 1], bg[:, 2], s=self.s_bg,
@@ -290,7 +295,7 @@ class LiveDensifier3D:
         if self.rotate:
             self.azim = (self.azim + self.azim_step) % 360
         ax.view_init(elev=self.elev, azim=self.azim)
-        self._set_limits(all_xyz)
+        self._set_limits(bg_src)
         ax.set_title(f"iter {event['iter']}   clone={n_clone(event)}  "
                      f"split={n_split(event)}  prune={n_prune(event)}")
         ax.set_axis_off()
@@ -306,7 +311,7 @@ class LiveDensifier3D:
 
 
 def _collect_xyz(events) -> Optional[np.ndarray]:
-    """Concatenate every highlighted point across all events (for auto-framing)."""
+    """Every highlighted point (+ any per-event snapshot) for auto-framing."""
     chunks = []
     for e in events:
         for key in ("clone", "split"):
@@ -315,6 +320,9 @@ def _collect_xyz(events) -> Optional[np.ndarray]:
                 chunks.append(_t(x["child_xyz"]))
         for x in e["prune"]:
             chunks.append(_t(x["xyz"]))
+        snap = e.get("all_xyz")
+        if snap is not None:
+            chunks.append(_t(snap))
     return np.concatenate(chunks, 0) if chunks else None
 
 
@@ -353,9 +361,10 @@ def animate_replay(log, out_path=None, background_xyz=None, fps: int = 10, dpi: 
 
     def frame(i):
         e = events[i]
+        bg_src = e.get("all_xyz", background_xyz)
         ax.clear()
-        if show_bg and background_xyz is not None:
-            b = _t(background_xyz)
+        if show_bg and bg_src is not None:
+            b = _t(bg_src)
             b = b[::max(1, len(b) // max_bg)]
             if len(b):
                 ax.scatter(b[:, 0], b[:, 1], b[:, 2], s=s_bg, c=bg_color,
@@ -481,6 +490,9 @@ def plotly_replay(log, background_xyz=None, max_bg: int = 8000, size: float = 3.
     Rotate / zoom freely, then drag the slider (or press *play*) to step through
     the densification iterations.  Affected Gaussians keep the usual colours
     (clone = cyan, split = orange, pruned = red) over a neutral grey background.
+    If the log has per-event snapshots (``event["all_xyz"]``), the background
+    follows the model per iteration; otherwise the static ``background_xyz`` is
+    used.
 
     Call ``fig.show()`` inline, or pass ``path="viewer.html"`` to write a
     portable file that opens in any browser without Python/Colab.
@@ -508,19 +520,36 @@ def plotly_replay(log, background_xyz=None, max_bg: int = 8000, size: float = 3.
     else:
         axes = [{}, {}, {}]
 
-    ev_traces = _event_traces(events[0], size=size)
-    base = []
-    if show_bg and background_xyz is not None:
-        b = _t(background_xyz)
+    def bg_trace(e):
+        b = e.get("all_xyz", background_xyz)
+        if not show_bg or b is None:
+            return None
+        b = _t(b)
         b = b[::max(1, len(b) // max_bg)]
-        base.append(go.Scatter3d(
+        return go.Scatter3d(
             x=b[:, 0], y=b[:, 1], z=b[:, 2], mode="markers",
             marker=dict(size=bg_size, color=bg_color, opacity=0.35),
-            name="other Gaussians", hoverinfo="skip"))
-    base += ev_traces
-    ev_idx = list(range(len(base) - len(ev_traces), len(base)))
+            name="other Gaussians", hoverinfo="skip")
 
-    frames = [go.Frame(data=_event_traces(e, size=size), traces=ev_idx, name=str(e["iter"]))
+    def empty_bg():
+        return go.Scatter3d(x=[], y=[], z=[], mode="markers",
+                            marker=dict(size=bg_size, color=bg_color, opacity=0.35),
+                            name="other Gaussians", hoverinfo="skip")
+
+    ev_traces = _event_traces(events[0], size=size)
+    first_bg = bg_trace(events[0])
+    use_bg = first_bg is not None
+    base = ([first_bg] if use_bg else []) + ev_traces
+    all_idx = list(range(len(base)))
+
+    def frame_data(e):
+        data = []
+        if use_bg:
+            bt = bg_trace(e)
+            data.append(bt if bt is not None else empty_bg())
+        return data + _event_traces(e, size=size)
+
+    frames = [go.Frame(data=frame_data(e), traces=all_idx, name=str(e["iter"]))
               for e in events]
     steps = [dict(method="animate", label=str(e["iter"]),
                   args=[[str(e["iter"])],

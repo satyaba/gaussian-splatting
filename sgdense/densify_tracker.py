@@ -58,11 +58,22 @@ class DensifyTracker:
     gaussians:
         The model currently being densified (only read: xyz, scaling, opacity,
         ``seg_hist``, ``max_radii2D``).
+    snapshot_max_points:
+        If > 0, store a decimated copy of the *current* model in every event as
+        ``event["all_xyz"]`` (capped at this many points).  This gives the
+        live/replay/Plotly viewers an exact per-event background.  0 (default)
+        disables snapshotting.  Cost per event ~ ``snapshot_max_points * 12``
+        bytes.
+    snapshot_every:
+        Snapshot only every ``snapshot_every``-th event (1 = all events).
+    snapshot_opacity:
+        Also store the decimated opacities as ``event["all_opacity"]``.
     """
 
     ORIG, CLONE, SPLIT = 0, 1, 2
 
-    def __init__(self, gaussians):
+    def __init__(self, gaussians, snapshot_max_points: int = 0,
+                 snapshot_every: int = 1, snapshot_opacity: bool = False):
         self.g = gaussians
         dev = gaussians.get_xyz.device
         n = int(gaussians.get_xyz.shape[0])
@@ -78,6 +89,12 @@ class DensifyTracker:
         self.events: List[Dict[str, Any]] = []   # one record per densification event
         self.summary: List[Dict[str, Any]] = []  # population / counts per event
         self.pending: Optional[Dict[str, Any]] = None
+
+        # optional per-event background snapshots (for exact offline context)
+        self.snapshot_max_points = int(snapshot_max_points)
+        self.snapshot_every = max(1, int(snapshot_every))
+        self.snapshot_opacity = bool(snapshot_opacity)
+        self._n_events = 0
 
     # ------------------------------------------------------------------ internals
     def _mint(self, k: int) -> torch.Tensor:
@@ -104,6 +121,18 @@ class DensifyTracker:
         if sub_hist.dim() == 2 and sub_hist.shape[1] > 0:
             return sub_hist.argmax(dim=1).cpu()
         return torch.full((sub_hist.shape[0],), -1, dtype=torch.long)
+
+    def _snapshot(self) -> Dict[str, Any]:
+        """Decimated copy of the current model for per-event background context."""
+        xyz = self.g.get_xyz.detach()
+        n = int(xyz.shape[0])
+        step = max(1, n // max(1, self.snapshot_max_points))
+        sl = slice(None, None, step)
+        out: Dict[str, Any] = {"all_xyz": xyz[sl].float().cpu()}
+        if self.snapshot_opacity:
+            op = self.g.get_opacity.detach().squeeze(1)
+            out["all_opacity"] = op[sl].float().cpu()
+        return out
 
     # ---------------------------------------------------------------------- hooks
     def on_clone(self, sel, grad, child_xyz, N: int = 1, regime: Optional[str] = None):
@@ -217,8 +246,12 @@ class DensifyTracker:
         s = sum(len(x["parent_gid"]) for x in p["split"])
         pr = sum(len(x["gid"]) for x in p["prune"])
         if c or s or pr or p["resets"]:
-            self.events.append(dict(iter=iteration, clone=p["clone"], split=p["split"],
-                                    prune=p["prune"], resets=p["resets"]))
+            rec = dict(iter=iteration, clone=p["clone"], split=p["split"],
+                       prune=p["prune"], resets=p["resets"])
+            if self.snapshot_max_points and (self._n_events % self.snapshot_every == 0):
+                rec.update(self._snapshot())
+            self.events.append(rec)
+            self._n_events += 1
             self.summary.append(dict(iter=iteration, n=n_model,
                                      clones=c, splits=s, prunes=pr))
         self.pending = None
