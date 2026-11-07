@@ -34,6 +34,7 @@ from sgdense.viz import (
     replay,
     animate_replay,
     plotly_replay,
+    save_report,
     build_family_index,
     show_lineage,
 )
@@ -64,6 +65,7 @@ __all__ = [
     "replay",
     "animate_replay",
     "plotly_replay",
+    "save_report",
     "build_family_index",
     "show_lineage",
 ]

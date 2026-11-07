@@ -481,21 +481,13 @@ def _event_traces(e: Dict[str, Any], size: float = 3.0):
     ]
 
 
-def plotly_replay(log, background_xyz=None, max_bg: int = 8000, size: float = 3.0,
-                  bg_size: float = 1.2, bg_color: str = "#bdbdbd", show_bg: bool = True,
-                  path: Optional[str] = None, height: int = 700,
-                  title: str = "SGDense densification \u2014 per-iteration 3D viewer"):
-    """Interactive Plotly 3D viewer over every event in the log.
+def _plotly_viewer_fig(log, background_xyz=None, max_bg: int = 8000, size: float = 3.0,
+                       bg_size: float = 1.2, bg_color: str = "#bdbdbd", show_bg: bool = True,
+                       height: int = 700,
+                       title: str = "SGDense densification \u2014 per-iteration 3D viewer"):
+    """Build (but do not write) the interactive Plotly figure for a log.
 
-    Rotate / zoom freely, then drag the slider (or press *play*) to step through
-    the densification iterations.  Affected Gaussians keep the usual colours
-    (clone = cyan, split = orange, pruned = red) over a neutral grey background.
-    If the log has per-event snapshots (``event["all_xyz"]``), the background
-    follows the model per iteration; otherwise the static ``background_xyz`` is
-    used.
-
-    Call ``fig.show()`` inline, or pass ``path="viewer.html"`` to write a
-    portable file that opens in any browser without Python/Colab.
+    Returns ``None`` when the log has no events.
     """
     try:
         import plotly.graph_objects as go
@@ -504,7 +496,6 @@ def plotly_replay(log, background_xyz=None, max_bg: int = 8000, size: float = 3.
 
     events = log.events
     if not events:
-        print("no events to plot")
         return None
 
     # fixed axis ranges across every highlighted point (+ background)
@@ -575,6 +566,132 @@ def plotly_replay(log, background_xyz=None, max_bg: int = 8000, size: float = 3.
                                         transition=dict(duration=0))]),
             ])],
     )
-    if path is not None:
-        fig.write_html(path, include_plotlyjs="cdn")
     return fig
+
+
+def plotly_replay(log, background_xyz=None, path: Optional[str] = None,
+                  config=None, panels=None, **kwargs):
+    """Interactive Plotly 3D viewer over every event in the log.
+
+    Rotate / zoom freely, then drag the slider (or press *play*) to step through
+    the densification iterations.  Affected Gaussians keep the usual colours
+    (clone = cyan, split = orange, pruned = red) over a neutral grey background.
+    Per-event snapshots (``event["all_xyz"]``) drive the background when present.
+
+    Call ``fig.show()`` inline, or pass ``path="viewer.html"`` to write a portable
+    file.  If ``config`` and/or ``panels`` are also passed, the written file is a
+    full report --- interactive viewer + timeline/conditions/prune panels + the
+    experiment config --- see :func:`save_report`.
+    """
+    fig = _plotly_viewer_fig(log, background_xyz=background_xyz, **kwargs)
+    if path is not None:
+        if config is not None or panels is not None:
+            save_report(log, path, config=config, background_xyz=background_xyz,
+                        panels=panels or ("timeline", "conditions", "prune"),
+                        title=kwargs.get("title", "SGDense densification report"))
+        elif fig is not None:
+            fig.write_html(path, include_plotlyjs="cdn")
+    return fig
+
+
+def _fig_to_base64(fig) -> str:
+    import io
+    import base64
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=120, bbox_inches="tight")
+    _mpl()[0].close(fig)
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+def save_report(log, path: str, config=None, background_xyz=None,
+                panels=("timeline", "conditions", "prune"), grad_thr=None,
+                size_thr=None, embed_plotlyjs: bool = False,
+                title: str = "SGDense densification report",
+                viewer_fig=None, **viewer_kwargs):
+    """Write one self-contained HTML report for a densification log.
+
+    The page contains:
+
+    * the **interactive 3D replay** (drag to rotate, slider / play to step);
+    * static diagnostic panels --- **timeline**, **selection conditions** and
+      **prune breakdown** (rendered from the matplotlib figures as embedded PNGs);
+    * the **experiment config** (pass a dict or the path to
+      ``experiment_config.json``);
+    * a per-event **summary table**.
+
+    ``panel`` names are drawn from ``("timeline", "conditions", "prune")``.
+    ``viewer_fig`` lets a caller reuse an already-built Plotly figure; otherwise
+    one is built from ``viewer_kwargs``.  Set ``embed_plotlyjs=True`` for a fully
+    offline file (a few MB larger), else plotly.js is loaded from a CDN.
+    """
+    import html as _html
+    import json as _json
+
+    if not log.events:
+        print("no events to report")
+        return None
+
+    if viewer_fig is None:
+        viewer_fig = _plotly_viewer_fig(log, background_xyz=background_xyz, **viewer_kwargs)
+    viewer_html = (viewer_fig.to_html(full_html=False, config={"responsive": True},
+                                      include_plotlyjs=(True if embed_plotlyjs else "cdn"))
+                   if viewer_fig is not None else "<p>no events</p>")
+
+    imgs = {}
+    if "timeline" in panels:
+        imgs["timeline"] = _fig_to_base64(plot_timeline(log))
+    if "conditions" in panels:
+        imgs["conditions"] = _fig_to_base64(plot_conditions(log, grad_thr=grad_thr, size_thr=size_thr))
+    if "prune" in panels:
+        imgs["prune"] = _fig_to_base64(plot_prune_breakdown(log))
+
+    if isinstance(config, str):
+        with open(config, "r", encoding="utf-8") as f:
+            config = _json.load(f)
+    cfg_html = ("<pre>" + _html.escape(_json.dumps(config, indent=2)) + "</pre>"
+                if config is not None else "<p class='meta'>no config provided</p>")
+
+    rows = "".join(
+        f"<tr><td>{s['iter']}</td><td>{s['n']:,}</td><td>{s['clones']}</td>"
+        f"<td>{s['splits']}</td><td>{s['prunes']}</td></tr>" for s in log.summary)
+    table = ("<table><tr><th>iteration</th><th># Gaussians</th><th>clones</th>"
+             "<th>splits</th><th>prunes</th></tr>" + rows + "</table>") if rows else ""
+
+    def section(head, body):
+        return f"<section><h2>{_html.escape(head)}</h2>{body}</section>"
+
+    def img(b64):
+        return f'<img src="data:image/png;base64,{b64}"/>'
+
+    n_final = log.summary[-1]["n"] if log.summary else 0
+    parts = [
+        "<!doctype html><html><head><meta charset='utf-8'>",
+        f"<title>{_html.escape(title)}</title>",
+        "<style>",
+        "body{font-family:system-ui,Segoe UI,Arial,sans-serif;margin:24px;background:#fafafa;color:#111}",
+        "h1{margin:0 0 4px} h2{border-bottom:1px solid #e5e7eb;padding-bottom:4px;margin-top:28px}",
+        "img{max-width:100%;height:auto;border:1px solid #eee;background:#fff;border-radius:6px}",
+        "pre{background:#0f172a;color:#e2e8f0;padding:16px;border-radius:8px;overflow:auto;max-height:380px}",
+        "table{border-collapse:collapse;font-size:13px} th,td{border:1px solid #ddd;padding:4px 8px;text-align:right}",
+        "th:first-child,td:first-child{text-align:left} .meta{color:#555;font-size:13px}",
+        "</style></head><body>",
+        f"<h1>{_html.escape(title)}</h1>",
+        f"<p class='meta'>{len(log.events)} densification events &middot; "
+        f"{n_final:,} Gaussians at the last event</p>",
+    ]
+    if "timeline" in imgs:
+        parts.append(section("Densification events (timeline)", img(imgs["timeline"])))
+    if "conditions" in imgs:
+        parts.append(section("Selection conditions", img(imgs["conditions"])))
+    if "prune" in imgs:
+        parts.append(section("Prune breakdown", img(imgs["prune"])))
+    parts.append(section("3D replay &mdash; interactive (drag to rotate; slider / play to step)",
+                         viewer_html))
+    parts.append(section("Experiment config", cfg_html))
+    if table:
+        parts.append(section("Per-event summary", table))
+    parts.append("</body></html>")
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(parts))
+    return path
