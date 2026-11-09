@@ -15,14 +15,23 @@ class DensificationConfig:
     lvl2_floaters: bool = True
     position_based_thresh: bool = False
     texture_based_thresh: bool = False
+    texture_based_scale: bool = False
+
+    # --- floater lifecycle (notebook FLOATER_ACTION) ---
+    # 'prune'  -> remove flagged floaters every densification event (run26; churn)
+    # 'freeze' -> keep them, de-candidate for clone/split (no churn)
+    floater_action: str = "prune"
 
     # --- POSITION_BASED_THRESH weights (per-regime dense_weight) ---
     interior_weight: float = 1.0
     boundary_weight: float = 0.5
     other_weight: float = 1.0
 
-    # --- TEXTURE_BASED_THRESH ---
+    # --- TEXTURE_BASED_THRESH (gradient threshold) ---
     texture_beta: float = 0.5
+
+    # --- TEXTURE_BASED_SCALE (clone/split size threshold) ---
+    texture_scale_beta: float = 0.5
 
     # --- category thresholds (TAU_* in the notebook) ---
     tau_p1: float = 0.85

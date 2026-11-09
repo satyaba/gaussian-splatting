@@ -49,10 +49,13 @@ def generate_category_masks(N, top2_vals, sum_vals, entropies, coordinates, opac
     p1 = top2_np[:, 0]
     p2 = top2_np[:, 1]
 
-    # NOTE: preserved verbatim from the run26 notebook. `S` is mass while p1/p2
-    # are probabilities, so `tail` mixes units; flagged in docs/06 as a known
-    # issue kept for behavioural fidelity with run26.
-    tail = S_np - p1 - p2
+    # Residual probability mass outside the top-2 classes (range [0, 1]).
+    # tau_tail_high is a *probability* threshold, so `tail` must be in the same
+    # units as p1/p2 -- NOT evidence mass S. The run26 notebook wrote
+    # `S - p1 - p2`, which mixed units: since S grows with observations, the
+    # `tail > tau_tail_high` gate became all-but-vacuous for well-observed
+    # Gaussians and inverted its intent. Corrected to 1 - p1 - p2 (docs/06 §3).
+    tail = 1.0 - p1 - p2
 
     lab[observed & (p1 > cfg.tau_p1) & (e_np < cfg.tau_entropy_low)] = CATEGORY_NAMES.index("interior")
     lab[observed & (p1 <= cfg.tau_p1) & (p2 > cfg.tau_p2_high)

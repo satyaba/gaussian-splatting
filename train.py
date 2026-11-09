@@ -58,10 +58,13 @@ def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations,
         lvl2_floaters=sgdense.lvl2_floaters,
         position_based_thresh=sgdense.position_based_thresh,
         texture_based_thresh=sgdense.texture_based_thresh,
+        texture_based_scale=sgdense.texture_based_scale,
+        floater_action=sgdense.floater_action,
         interior_weight=sgdense.interior_weight,
         boundary_weight=sgdense.boundary_weight,
         other_weight=sgdense.other_weight,
         texture_beta=sgdense.texture_beta,
+        texture_scale_beta=sgdense.texture_scale_beta,
         tau_p1=sgdense.tau_p1,
         tau_p2_high=sgdense.tau_p2_high,
         tau_entropy_low=sgdense.tau_entropy_low,
@@ -76,10 +79,11 @@ def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations,
         thin_ratio_div=sgdense.thin_ratio_div,
     )
 
-    # Per-class texture score for TEXTURE_BASED_THRESH: load the cached s_tilde
-    # from the model dir, else compute it from the dataset and cache it.
+    # Per-class texture score for TEXTURE_BASED_THRESH / TEXTURE_BASED_SCALE: load
+    # the cached s_tilde from the model dir, else compute it from the dataset and
+    # cache it.
     s_tilde = None
-    if cfg.texture_based_thresh:
+    if cfg.texture_based_thresh or cfg.texture_based_scale:
         s_tilde_path = os.path.join(dataset.model_path, "s_tilde.npy")
         if os.path.exists(s_tilde_path):
             s_tilde = np.load(s_tilde_path)

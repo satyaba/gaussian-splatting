@@ -126,12 +126,17 @@ class SGDenseParams(ParamGroup):
         self.lvl2_floaters = True
         self.position_based_thresh = False
         self.texture_based_thresh = False
+        self.texture_based_scale = False
+        # --- floater lifecycle ('prune' | 'freeze') ---
+        self.floater_action = "prune"
         # --- POSITION_BASED_THRESH per-regime scaling-threshold weights ---
         self.interior_weight = 1.0
         self.boundary_weight = 0.5
         self.other_weight = 1.0
-        # --- TEXTURE_BASED_THRESH ---
+        # --- TEXTURE_BASED_THRESH (gradient threshold) ---
         self.texture_beta = 0.5
+        # --- TEXTURE_BASED_SCALE (clone/split size threshold) ---
+        self.texture_scale_beta = 0.5
         # --- category thresholds (TAU_*) ---
         self.tau_p1 = 0.85
         self.tau_p2_high = 0.25

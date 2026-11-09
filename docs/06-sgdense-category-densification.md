@@ -55,9 +55,15 @@ offset / spacing) via 3D-grid kNN + PCA plane fit. A 10% hold-out of `interior` 
 the p99 baselines. Supported → boundary; unsupported in both → floaters (when
 `lvl2_floaters`).
 
-**Known issue (preserved for run26 fidelity).** `tail = S - p1 - p2` mixes mass (`S`)
-with probabilities (`p1,p2`). Likely intended `1 - p1 - p2`. Kept verbatim so the
-integration matches run26; flagged here for a follow-up decision (see §6).
+**Resolved (2026-11-08).** `tail` is the residual probability mass outside the
+top-2 classes, `1 - p1 - p2` (range [0, 1]), matching `tau_tail_high`. The run26
+notebook computed `S - p1 - p2`, mixing evidence mass (`S`, unbounded) with
+probabilities (`p1,p2`): because `S` grows with observation, the
+`tail > tau_tail_high` gate became all-but-vacuous for well-observed Gaussians and
+inverted its intent (confident, evidence-rich Gaussians were the most likely to be
+flagged ambiguous/floaters). The `ambiguous`/`floaters` rules therefore degenerated
+to `entropy > tau_entropy_high` (+ the opacity gate for floaters). Corrected in
+`sgdense/categories.py` and the notebook.
 
 ## 4. Densification policy (`DensificationConfig`)
 
@@ -68,6 +74,18 @@ integration matches run26; flagged here for a follow-up decision (see §6).
   regime routing. Default False.
 - `texture_based_thresh` + `texture_beta` — scale the densification gradient
   threshold per class from `s_tilde` (`class_freq_thres`). Default False.
+- `texture_based_scale` + `texture_scale_beta` — scale the clone/split **size**
+  threshold per class from `s_tilde` (`class_freq_thres` on
+  `dense_weight * percent_dense * scene_extent`). Default False.
+- `floater_action` (`'prune'` | `'freeze'`) — floater lifecycle. `'prune'`
+  removes flagged floaters every densification event (run26; churn);
+  `'freeze'` keeps them and de-candidates them for clone/split (no churn).
+  Default `'prune'`.
+
+Both texture routes read the same cached `s_tilde`; `train.py` computes it when
+either is enabled. `floater_action='freeze'` passes a `freeze_mask` through
+`densify_and_clone` / `densify_and_split` (position-based routing already
+excludes floaters from the regimes, so the mask is not needed there).
 
 Ablation switches are exposed as CLI flags (`--no_lvl1_floaters`, etc.); the
 resolved policy is written to `<model_path>/experiment_config.json`.
@@ -85,8 +103,16 @@ Defaults (run26): `seg_warmup_iters=2000`.
 
 ## 6. Open items
 
-1. Resolve the `tail` unit mismatch (mass vs probability).
-2. `spike_route.py` (T1 diagnostics) is left in place but describes the superseded
+1. **[resolved 2026-11-08]** `tail` unit mismatch (mass vs probability) → now
+   `1 - p1 - p2`. See §3.
+2. **Opacity gate couples floater detection to `reset_opacity`.** The L1/L2 floater
+   rules gate on `opac < opacity_thres`, and `reset_opacity` clamps every Gaussian
+   to ≤0.01, so each reset seeds a prune burst. Audit of the run26-style runs showed
+   the L1+L2 gate is **net-inflating**: ~846k floaters pruned bought ~1.8M extra
+   Gaussians added (2× per-capita densification; the model never saturates).
+   Decide whether the opacity gate belongs in the floater rule at all, and judge the
+   gate on quality at matched Gaussian count (doc 02 §239), not on count.
+3. `spike_route.py` (T1 diagnostics) is left in place but describes the superseded
    `(disagree, structure)` split; re-purpose or retire later.
 
 ## 7. Data prep / eval scripts

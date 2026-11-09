@@ -548,8 +548,18 @@ class GaussianModel:
             return new_thresh[gauss_class_ids]
         return grad_threshold
 
+    def _gauss_scale_thresh(self, basic_thresh, cfg, s_tilde):
+        """Per-Gaussian scaling threshold. TEXTURE_BASED_SCALE scales the scalar
+        clone/split size threshold per class via s_tilde; otherwise scalar."""
+        if cfg is not None and cfg.texture_based_scale and s_tilde is not None:
+            new_thresh = torch.tensor(
+                class_freq_thres(basic_thresh, s_tilde, cfg.texture_scale_beta), device='cuda')
+            gauss_class_ids = torch.argmax(self.seg_hist, dim=1)
+            return new_thresh[gauss_class_ids]
+        return basic_thresh
+
     def densify_and_split(self, grads, grad_threshold, scene_extent, N=2, dense_weight=1,
-                          sel_mask=None, cfg=None, s_tilde=None):
+                          sel_mask=None, cfg=None, s_tilde=None, freeze_mask=None):
         n_init_points = self.get_xyz.shape[0]
         # Extract points that satisfy the gradient condition
         padded_grad = torch.zeros((n_init_points), device="cuda")
@@ -557,11 +567,16 @@ class GaussianModel:
 
         gauss_thresh = self._gauss_thresh(grad_threshold, cfg, s_tilde)
         selected_pts_mask = torch.where(padded_grad >= gauss_thresh, True, False)
+        scale_thresh = self._gauss_scale_thresh(
+            dense_weight * self.percent_dense * scene_extent, cfg, s_tilde)
         selected_pts_mask = torch.logical_and(selected_pts_mask,
-                                              torch.max(self.get_scaling, dim=1).values > dense_weight * self.percent_dense*scene_extent)
+                                              torch.max(self.get_scaling, dim=1).values > scale_thresh)
         if sel_mask is not None:                                                 # boundary regime
             selected_pts_mask = torch.logical_and(
                 selected_pts_mask, self._pad_mask(sel_mask, n_init_points))
+        if freeze_mask is not None:                                              # FREEZE: never split
+            selected_pts_mask = torch.logical_and(
+                selected_pts_mask, ~self._pad_mask(freeze_mask, n_init_points))
 
         # Vanilla split placement: children sampled from N(0, Sigma) in the
         # parent's local frame (standard 3DGS).
@@ -589,7 +604,7 @@ class GaussianModel:
         return prune_filter, n_children
 
     def densify_and_clone(self, grads, grad_threshold, scene_extent, dense_weight=1,
-                          sel_mask=None, cfg=None, s_tilde=None):
+                          sel_mask=None, cfg=None, s_tilde=None, freeze_mask=None):
         # Extract points that satisfy the gradient condition
         n_init_points = self.get_xyz.shape[0]
 
@@ -598,10 +613,15 @@ class GaussianModel:
 
         gauss_thresh = self._gauss_thresh(grad_threshold, cfg, s_tilde)
         selected_pts_mask = padded_grad >= gauss_thresh
+        scale_thresh = self._gauss_scale_thresh(
+            dense_weight * self.percent_dense * scene_extent, cfg, s_tilde)
         selected_pts_mask = torch.logical_and(selected_pts_mask,
-                                              torch.max(self.get_scaling, dim=1).values <= dense_weight * self.percent_dense*scene_extent)
+                                              torch.max(self.get_scaling, dim=1).values <= scale_thresh)
         if sel_mask is not None:                                                 # interior regime
             selected_pts_mask = torch.logical_and(selected_pts_mask, sel_mask)
+        if freeze_mask is not None:                                              # FREEZE: never clone
+            selected_pts_mask = torch.logical_and(
+                selected_pts_mask, ~self._pad_mask(freeze_mask, n_init_points))
 
         new_xyz = self._xyz[selected_pts_mask]
         new_features_dc = self._features_dc[selected_pts_mask]
@@ -622,17 +642,23 @@ class GaussianModel:
         cfg = cfg if cfg is not None else _DEFAULT_CFG
         self.tmp_radii = radii                       # set BEFORE prune_points (it prunes tmp_radii)
 
-        # floater -> prune FIRST, while every mask is index-aligned to the
-        # pre-densification population (P_old). Subsetting the survivor masks by
-        # ~floater keeps clone/split aligned across the removal.
-        if floater_mask is not None:
+        # Floater lifecycle (cfg.floater_action):
+        #   'prune'  -> remove them now (run26); recurs every event and causes churn
+        #   'freeze' -> keep them, de-candidate for clone/split (no churn)
+        freeze_mask = None
+        if floater_mask is not None and cfg.floater_action == "prune":
+            # prune FIRST, while every mask is index-aligned to the pre-
+            # densification population (P_old). Subsetting the survivor masks by
+            # ~floater keeps clone/split aligned across the removal.
             self.prune_points(floater_mask)
             keep = ~floater_mask
             interior_mask = interior_mask[keep] if interior_mask is not None else None
             boundary_mask = boundary_mask[keep] if boundary_mask is not None else None
             other_mask = other_mask[keep] if other_mask is not None else None
+        elif floater_mask is not None and cfg.floater_action == "freeze":
+            freeze_mask = floater_mask
 
-        grads = self.xyz_gradient_accum / self.denom   # recomputed: the prune above changed the length
+        grads = self.xyz_gradient_accum / self.denom   # recomputed: any prune above changed the length
         grads[grads.isnan()] = 0.0
 
         if cfg.position_based_thresh:
@@ -667,9 +693,11 @@ class GaussianModel:
                     regimes[rest] = (self._remap_after_split(rm, prune_filter), rt)
         else:
             self.densify_and_clone(grads, max_grad, extent,
-                                   dense_weight=1, cfg=cfg, s_tilde=s_tilde)
+                                   dense_weight=1, cfg=cfg, s_tilde=s_tilde,
+                                   freeze_mask=freeze_mask)
             prune_filter, n_children = self.densify_and_split(
-                grads, max_grad, extent, dense_weight=1, cfg=cfg, s_tilde=s_tilde)
+                grads, max_grad, extent, dense_weight=1, cfg=cfg, s_tilde=s_tilde,
+                freeze_mask=freeze_mask)
 
         prune_mask = (self.get_opacity < min_opacity).squeeze()
         if max_screen_size:

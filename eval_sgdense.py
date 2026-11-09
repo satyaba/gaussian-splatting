@@ -10,6 +10,7 @@
 # Requires the decoder checkpoint written by train.py (<model_path>/decoder<N>.pth).
 import os
 import sys
+import json
 from argparse import ArgumentParser
 
 import numpy as np
@@ -130,6 +131,13 @@ def evaluate(gaussians, scene, dataset, pipe, decoder, cams, name, lp, ssim_fn, 
           f"SSIM {np.mean(ssims):.4f} | LPIPS {np.mean(lpipss):.4f}")
     print("  worst 3 by PSNR:", [(n, round(p, 2)) for n, p in sorted(per_view, key=lambda x: x[1])[:3]])
 
+    metrics = {
+        "num_views": len(cams),
+        "psnr": float(np.mean(psnrs)),
+        "ssim": float(np.mean(ssims)),
+        "lpips": float(np.mean(lpipss)),
+    }
+
     if decoder is not None and conf.sum() > 0:
         c = conf.double().cpu().numpy()
         tp, gt_cnt, pr_cnt = np.diag(c), c.sum(1), c.sum(0)
@@ -141,10 +149,22 @@ def evaluate(gaussians, scene, dataset, pipe, decoder, cams, name, lp, ssim_fn, 
               f"fwIoU {(freq[present]*iou[present]).sum():.4f}")
         worst = np.argsort(np.where(present, iou, np.inf))[:5]
         print("  lowest-IoU classes:", [(int(k), round(float(iou[k]), 3)) for k in worst])
-    return samples
+        metrics["semantic"] = {
+            "pixel_acc": float(tp.sum() / c.sum()),
+            "miou": float(iou[present].mean()),
+            "fwiou": float((freq[present] * iou[present]).sum()),
+        }
+    return samples, metrics
 
 
-def run(dataset, iteration, pipe, skip_train, skip_test, num_samples, out_dir):
+def run(dataset, iteration, pipe, skip_train, skip_test, num_samples, out_dir, json_out=None):
+    # A vanilla (upstream graphdeco) cfg_args carries no segmentation fields;
+    # default them so this fork's loader/renderer can score vanilla PLYs too.
+    for k, v in (("seg_encoding_dim", 32), ("num_segmentation_classes", 0),
+                 ("segmentation_path", "")):
+        if not hasattr(dataset, k):
+            setattr(dataset, k, v)
+
     gaussians = GaussianModel(dataset.sh_degree, seg_encoding_dim=dataset.seg_encoding_dim,
                               num_segmentation_classes=dataset.num_segmentation_classes)
     scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
@@ -173,13 +193,28 @@ def run(dataset, iteration, pipe, skip_train, skip_test, num_samples, out_dir):
     if not skip_test:
         splits["test"] = scene.getTestCameras()
 
+    results = {
+        "run_dir": os.path.abspath(dataset.model_path),
+        "iteration": int(scene.loaded_iter),
+        "gaussians": int(gaussians.get_xyz.shape[0]),
+        "splits": {},
+    }
+
     for name, cams in splits.items():
         if not cams:
             continue
-        samples = evaluate(gaussians, scene, dataset, pipe, decoder, cams, name,
-                           lp, ssim_fn, palette, num_samples)
+        samples, metrics = evaluate(gaussians, scene, dataset, pipe, decoder, cams, name,
+                                    lp, ssim_fn, palette, num_samples)
+        results["splits"][name] = metrics
         if decoder is not None:
             _plot_samples(samples, name, palette, dataset.num_segmentation_classes, out_dir=out_dir)
+
+    print(f"[sgdense-eval] gaussians: {results['gaussians']}")
+    if json_out:
+        with open(json_out, "w") as f:
+            json.dump(results, f, indent=1)
+        print(f"[sgdense-eval] wrote {json_out}")
+    return results
 
 
 if __name__ == "__main__":
@@ -191,9 +226,11 @@ if __name__ == "__main__":
     parser.add_argument("--skip_test", action="store_true")
     parser.add_argument("--num_samples", default=4, type=int)
     parser.add_argument("--out_dir", default="", type=str, help="if set, save sample grids here")
+    parser.add_argument("--json_out", default="", type=str, help="if set, write metrics JSON here")
     parser.add_argument("--quiet", action="store_true")
     args = get_combined_args(parser)
     print("Evaluating " + args.model_path)
     safe_state(args.quiet)
     run(model.extract(args), args.iteration, pipeline.extract(args),
-        args.skip_train, args.skip_test, args.num_samples, args.out_dir or None)
+        args.skip_train, args.skip_test, args.num_samples, args.out_dir or None,
+        args.json_out or None)
