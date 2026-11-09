@@ -111,7 +111,10 @@ register_method(
         label="SGDense-3DGS (seg-aware fork; this checkout)",
         repo=None,
         install=_rasterizer_install(),
-        common_args=("--disable_viewer", "--quiet"),
+        # --eval gives SGDense the SAME MipNeRF360-style (llffhold=8) train/test
+        # split as `vanilla_3dgs`; without it every image is training data and the
+        # row is not comparable to the baseline.
+        common_args=("--eval", "--disable_viewer", "--quiet"),
         uses_seg_rasterizer=True,
         notes=(
             "Runs in this repo. Needs per-run --segmentation_path and "
