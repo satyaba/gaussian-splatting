@@ -135,6 +135,15 @@ class SGDenseParams(ParamGroup):
         # Opt-in: logs the densification trigger distribution (per event) + the
         # raw per-iteration 2D-mean gradient norm to <model_path>/grad_stats.json.
         self.log_grad_stats = False
+        # --- densification gradient source (Option A) ---
+        # Off (default) = upstream behaviour: the clone/split trigger accumulates the
+        # gradient of the *total* loss w.r.t. the screen-space means, so every loss
+        # term (including the segmentation cross-entropy) can inflate the trigger.
+        # On = the trigger accumulates the PHOTOMETRIC (+ depth) position gradient
+        # only, decoupling densification from the segmentation loss; the full loss
+        # still drives the optimiser. Costs an extra rasteriser backward pass during
+        # the densification window.
+        self.densify_photo_grad_only = False
         # --- floater lifecycle ('prune' | 'freeze') ---
         self.floater_action = "prune"
         # --- POSITION_BASED_THRESH per-regime scaling-threshold weights ---

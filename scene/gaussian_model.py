@@ -24,6 +24,7 @@ from utils.general_utils import strip_symmetric, build_scaling_rotation
 from sgdense.readout import seg_hist_readout as _seg_hist_readout
 from sgdense.texture import class_freq_thres
 from sgdense.config import DensificationConfig
+from sgdense.densify_grad import accumulate_densify_stats as _accumulate_densify_stats
 
 # Vanilla fallback used when no SGDense config is supplied (all policy off).
 _DEFAULT_CFG = DensificationConfig(lvl1_floaters=False, lvl2_floaters=False)
@@ -755,9 +756,19 @@ class GaussianModel:
             return z, z, z, z, torch.zeros((self.get_xyz.shape[0], 0), device="cuda"), z
         return _seg_hist_readout(self.seg_hist, eps=eps)
 
-    def add_densification_stats(self, viewspace_point_tensor, update_filter):
-        self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
-        self.denom[update_filter] += 1
+    def add_densification_stats(self, viewspace_point_tensor, update_filter, point_grad=None):
+        """Accumulate the per-iteration screen-space gradient norm into the trigger.
+
+        ``point_grad`` overrides ``viewspace_point_tensor.grad`` when supplied: it is
+        the [P, 3] screen-space point gradient to accumulate. The SGDense
+        densification-decoupling pass (``--densify_photo_grad_only``) passes the
+        photometric-only gradient here so the segmentation loss cannot inflate the
+        densification metric.
+        """
+        if point_grad is None:
+            point_grad = viewspace_point_tensor.grad
+        _accumulate_densify_stats(self.xyz_gradient_accum, self.denom,
+                                  point_grad, update_filter)
 
 
 def save_seg_hist(gaussians, iteration, path):

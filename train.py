@@ -133,6 +133,16 @@ def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations,
         print(f"[SGDense] gradient-stat logging ON; will write "
               f"{os.path.join(dataset.model_path, 'grad_stats.json')}")
 
+    # Option A — densification gradient source. When on, the clone/split trigger
+    # accumulates only the photometric (+ depth) position gradient, so the
+    # segmentation cross-entropy (which reaches the screen-space means through the
+    # rasteriser) can no longer inflate the trigger. The full loss still drives the
+    # optimiser; the extra autograd pass is confined to the densification window.
+    densify_photo_only = getattr(sgdense, "densify_photo_grad_only", False)
+    if densify_photo_only:
+        print("[SGDense] densification-gradient decoupling ON: clone/split trigger "
+              "uses the photometric(+depth) position gradient only")
+
     # The rasterizer's channel count is a compile-time constant; keep Python-side
     # config honest about it.
     assert dataset.seg_encoding_dim == 32, "seg_encoding_dim must match NUM_SEG_CHANNELS in cuda_rasterizer/config.h (rebuild required to change)"
@@ -281,6 +291,11 @@ def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations,
             else:
                 Ll1depth = 0
 
+            # Photometric(+depth) objective *before* the segmentation term. When
+            # densify_photo_only is on, this sub-graph's position gradient is what
+            # feeds the clone/split trigger (see the backward phase below).
+            loss_no_seg = loss
+
             # Segmentation decode — AFTER rasterization, in the training loop (the
             # decoder compares decoded outputs across cameras for L_consist later).
             rendered_seg = render_pkg["rendered_seg"]                       # [NUM_SEG_CHANNELS, H, W]
@@ -300,16 +315,35 @@ def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations,
                 param_group['lr'] = get_decoder_lr(iteration)
 
         with profiler.phase("backward"):
+            # Densification-gradient decoupling (Option A): when enabled, extract
+            # the photometric(+depth) gradient w.r.t. the screen-space means with a
+            # non-accumulating autograd.grad pass, so the clone/split trigger can be
+            # fed that instead of the total (photo + seg) gradient. autograd.grad
+            # does NOT write .grad and retain_graph keeps the graph alive for the
+            # full backward below, so parameter updates are unchanged.
+            densify_point_grad = None
+            if (densify_photo_only and loss_no_seg.requires_grad
+                    and gt_segmentation is not None
+                    and iteration < opt.densify_until_iter
+                    and iteration > opt.seg_warmup_iters):
+                densify_point_grad = torch.autograd.grad(
+                    loss_no_seg, viewspace_point_tensor,
+                    retain_graph=True, allow_unused=True)[0]
             loss.backward()
 
         iter_end.record()
 
         with torch.no_grad():
             # Raw per-iteration 2D-mean gradient norm (the "gradient each Gaussian
-            # sees"); logged before the optimizer zeroes the grads below.
-            if grad_logger is not None and viewspace_point_tensor.grad is not None:
+            # sees"); logged before the optimizer zeroes the grads below. When the
+            # densification gradient is decoupled, log the gradient that actually
+            # drives the trigger so the stats reflect clone/split pressure.
+            densify_grad_for_log = (densify_point_grad
+                                    if densify_point_grad is not None
+                                    else viewspace_point_tensor.grad)
+            if grad_logger is not None and densify_grad_for_log is not None:
                 grad_logger.observe_iter(
-                    torch.norm(viewspace_point_tensor.grad[visibility_filter, :2], dim=-1),
+                    torch.norm(densify_grad_for_log[visibility_filter, :2], dim=-1),
                     iteration)
 
             # Progress bar
@@ -354,7 +388,8 @@ def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations,
             if iteration < opt.densify_until_iter and iteration > opt.seg_warmup_iters:
                 # Keep track of max radii in image-space for pruning
                 gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
-                gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
+                gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter,
+                                                  point_grad=densify_point_grad)
 
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                     densify_ran = True
