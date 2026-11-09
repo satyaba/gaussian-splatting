@@ -79,6 +79,16 @@ and analyse/plot with `sgdense.viz` (`plot_timeline`, `plot_prune_breakdown`,
 `plotly_replay`, `save_report`). The flag is off by default, so ordinary runs pay
 only one `is not None` check per lifecycle call.
 
+### Accumulated-gradient diagnostics
+
+`--log_grad_stats` (SGDense runs; also set by the vanilla notebook via
+`GRAD_STATS_OUT`) writes `<model_dir>/grad_stats.json` via
+`sgdense.grad_stats`: the window-averaged `xyz_gradient_accum/denom` distribution
+at each densification event plus the fraction at/over `densify_grad_threshold`
+(the clone/split trigger), and the raw per-iteration 2D-mean gradient norm. Use it
+to test whether an added loss term raises the gradient Gaussians see (and thus
+densification), ideally against a `--lambda_seg 0` ablation.
+
 ### Running one method directly
 
 ```bash

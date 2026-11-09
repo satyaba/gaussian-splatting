@@ -131,6 +131,10 @@ class SGDenseParams(ParamGroup):
         # Opt-in: when set, train.py attaches a DensifyTracker and writes
         # <model_path>/densify_events.pt (events + lineage + prune reasons).
         self.log_densify_events = False
+        # --- accumulated-gradient statistics (sgdense.grad_stats) ---
+        # Opt-in: logs the densification trigger distribution (per event) + the
+        # raw per-iteration 2D-mean gradient norm to <model_path>/grad_stats.json.
+        self.log_grad_stats = False
         # --- floater lifecycle ('prune' | 'freeze') ---
         self.floater_action = "prune"
         # --- POSITION_BASED_THRESH per-regime scaling-threshold weights ---

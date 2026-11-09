@@ -23,6 +23,7 @@ from sgdense.categories import CATEGORY_NAMES, generate_category_masks
 from sgdense.geometric import build_grid, pick_cell_size, grid_knn, reach_height, thin, p99
 from sgdense.texture import class_freq_thres, compute_texture_freq
 from sgdense.densify_tracker import DensifyTracker, TrackerLog, load_events
+from sgdense.grad_stats import GradStatsLogger, summarize
 from sgdense.viz import (
     plot_timeline,
     plot_conditions,
@@ -55,6 +56,8 @@ __all__ = [
     "DensifyTracker",
     "TrackerLog",
     "load_events",
+    "GradStatsLogger",
+    "summarize",
     "plot_timeline",
     "plot_conditions",
     "plot_prune_breakdown",

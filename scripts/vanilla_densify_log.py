@@ -43,6 +43,7 @@ if _repo and _repo not in sys.path:
 
 try:
     from sgdense.densify_tracker import DensifyTracker
+    from sgdense.grad_stats import GradStatsLogger
 except Exception as exc:  # pragma: no cover - configuration error, not logic
     raise ImportError(
         "vanilla_densify_log needs the `sgdense` package importable. Set the "
@@ -54,6 +55,8 @@ _last_step = None
 _suppress_prune = False
 _prune_reason = "opacity+size"
 _pending_split = None
+_grad_stats_out = os.environ.get("GRAD_STATS_OUT")
+_grad_logger = GradStatsLogger() if _grad_stats_out else None
 
 
 def _tracker_for(g):
@@ -78,6 +81,7 @@ def _install():
     _reset = GaussianModel.reset_opacity
     _densify_and_prune = GaussianModel.densify_and_prune
     _update_lr = GaussianModel.update_learning_rate
+    _add_stats = GaussianModel.add_densification_stats
 
     def densify_and_clone(self, grads, grad_threshold, scene_extent):
         # Same selection as upstream, recomputed so the tracker sees the mask.
@@ -137,7 +141,20 @@ def _install():
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, radii):
         global _prune_reason
         _prune_reason = "opacity+size" if max_screen_size else "opacity"
+        # Snapshot the accumulated trigger before the original resets it.
+        if _grad_logger is not None:
+            _grad_logger.threshold = float(max_grad)
+            _grad_logger.snapshot(self.xyz_gradient_accum, self.denom,
+                                  _last_step, threshold=max_grad)
         return _densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, radii)
+
+    def add_densification_stats(self, viewspace_point_tensor, update_filter):
+        res = _add_stats(self, viewspace_point_tensor, update_filter)
+        if _grad_logger is not None and viewspace_point_tensor.grad is not None:
+            _grad_logger.observe_iter(
+                torch.norm(viewspace_point_tensor.grad[update_filter, :2], dim=-1),
+                _last_step if _last_step is not None else 0)
+        return res
 
     def update_learning_rate(self, iteration):
         # Upstream calls this once per iteration -> stamp step + close last event.
@@ -156,19 +173,25 @@ def _install():
     GaussianModel.reset_opacity = reset_opacity
     GaussianModel.densify_and_prune = densify_and_prune
     GaussianModel.update_learning_rate = update_learning_rate
+    GaussianModel.add_densification_stats = add_densification_stats
 
 
 def _save():
     out = os.environ.get("DENSIFY_EVENTS_OUT")
-    if not out or _tracker is None:
-        return
-    try:
-        if _tracker.pending is not None and _last_step is not None:
-            _tracker.flush(_last_step)
-        _tracker.save(out)
-        print(f"[vanilla_densify_log] {len(_tracker.events)} densification events -> {out}")
-    except Exception as exc:  # never let logging break a finished run
-        print(f"[vanilla_densify_log] WARNING: could not save events: {exc}")
+    if _tracker is not None and out:
+        try:
+            if _tracker.pending is not None and _last_step is not None:
+                _tracker.flush(_last_step)
+            _tracker.save(out)
+            print(f"[vanilla_densify_log] {len(_tracker.events)} densification events -> {out}")
+        except Exception as exc:  # never let logging break a finished run
+            print(f"[vanilla_densify_log] WARNING: could not save events: {exc}")
+    if _grad_logger is not None and _grad_stats_out:
+        try:
+            _grad_logger.save(_grad_stats_out)
+            print(f"[vanilla_densify_log] {len(_grad_logger.events)} grad snapshots -> {_grad_stats_out}")
+        except Exception as exc:
+            print(f"[vanilla_densify_log] WARNING: could not save grad stats: {exc}")
 
 
 atexit.register(_save)

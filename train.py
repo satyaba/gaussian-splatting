@@ -122,6 +122,15 @@ def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations,
         print(f"[SGDense] densification event logging ON; will write "
               f"{os.path.join(dataset.model_path, 'densify_events.pt')}")
 
+    # Accumulated-gradient diagnostics (opt-in via --log_grad_stats): records the
+    # densification trigger distribution and the raw per-iteration 2D-mean gradient.
+    grad_logger = None
+    if getattr(sgdense, "log_grad_stats", False):
+        from sgdense.grad_stats import GradStatsLogger
+        grad_logger = GradStatsLogger(threshold=opt.densify_grad_threshold)
+        print(f"[SGDense] gradient-stat logging ON; will write "
+              f"{os.path.join(dataset.model_path, 'grad_stats.json')}")
+
     # The rasterizer's channel count is a compile-time constant; keep Python-side
     # config honest about it.
     assert dataset.seg_encoding_dim == 32, "seg_encoding_dim must match NUM_SEG_CHANNELS in cuda_rasterizer/config.h (rebuild required to change)"
@@ -279,6 +288,13 @@ def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations,
         iter_end.record()
 
         with torch.no_grad():
+            # Raw per-iteration 2D-mean gradient norm (the "gradient each Gaussian
+            # sees"); logged before the optimizer zeroes the grads below.
+            if grad_logger is not None and viewspace_point_tensor.grad is not None:
+                grad_logger.observe_iter(
+                    torch.norm(viewspace_point_tensor.grad[visibility_filter, :2], dim=-1),
+                    iteration)
+
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
             ema_Ll1depth_for_log = 0.4 * Ll1depth + 0.6 * ema_Ll1depth_for_log
@@ -354,6 +370,17 @@ def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations,
                             boundary_mask_t = torch.tensor(boundary_mask, device='cuda')
                             other_mask_t = torch.tensor(other_mask, device='cuda')
 
+                    # Snapshot the accumulated trigger BEFORE densify_and_prune
+                    # resets xyz_gradient_accum/denom.
+                    if grad_logger is not None:
+                        grow = grad_logger.snapshot(gaussians.xyz_gradient_accum,
+                                                    gaussians.denom, iteration)
+                        if tb_writer:
+                            tb_writer.add_scalar("grad/acc_mean", grow["mean"], iteration)
+                            tb_writer.add_scalar("grad/acc_p99", grow["p99"], iteration)
+                            tb_writer.add_scalar("grad/acc_frac_over", grow["frac_over"] or 0.0, iteration)
+                            tb_writer.add_scalar("grad/acc_thresh_pct", grow["thresh_pct"] or 0.0, iteration)
+
                     gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent,
                                                 size_threshold, radii, cfg=cfg, s_tilde=s_tilde,
                                                 interior_mask=interior_mask_t, boundary_mask=boundary_mask_t,
@@ -395,6 +422,10 @@ def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations,
         events_path = os.path.join(dataset.model_path, "densify_events.pt")
         densify_tracker.save(events_path)
         print(f"[SGDense] wrote densification events -> {events_path}")
+    if grad_logger is not None:
+        grad_path = os.path.join(dataset.model_path, "grad_stats.json")
+        grad_logger.save(grad_path)
+        print(f"[SGDense] wrote gradient stats -> {grad_path}")
     if tb_writer:
         tb_writer.flush()
         tb_writer.close()

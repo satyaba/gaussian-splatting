@@ -80,6 +80,8 @@ def test_densify_event_logging_wired():
         assert hook in gm, f"gaussian_model does not fire tracker hook {hook}"
     assert "DensifyTracker" in tr, "train.py does not construct a DensifyTracker"
     assert "densify_events.pt" in tr, "train.py does not save densify_events.pt"
+    assert "log_grad_stats" in arg, "arguments: --log_grad_stats missing"
+    assert "grad_stats.json" in tr, "train.py does not save grad_stats.json"
     print("PASS densify-event logging wired (model hooks + train.py save)")
 
 
@@ -88,10 +90,37 @@ def test_vanilla_densify_log_module():
     py_compile.compile(path, doraise=True)
     s = open(path).read()
     for name in ("densify_and_clone", "densify_and_split", "densification_postfix",
-                 "prune_points", "reset_opacity", "update_learning_rate", "DensifyTracker"):
+                 "prune_points", "reset_opacity", "update_learning_rate", "DensifyTracker",
+                 "GradStatsLogger"):
         assert name in s, f"vanilla_densify_log does not reference {name}"
     assert "DENSIFY_EVENTS_OUT" in s, "vanilla_densify_log has no save path env"
+    assert "GRAD_STATS_OUT" in s, "vanilla_densify_log has no grad-stats save path env"
     print("PASS vanilla_densify_log instrumentation module present")
+
+
+def test_grad_stats_algebra():
+    from sgdense.grad_stats import summarize, GradStatsLogger
+
+    # values >= 0.0002: {0.0002, 0.0003, 0.001} -> 3/5
+    s = summarize(torch.tensor([0.0, 0.0001, 0.0002, 0.0003, 0.001]), threshold=0.0002)
+    assert s["n"] == 5
+    assert abs(s["frac_over"] - 0.6) < 1e-9, f"frac_over={s['frac_over']}"
+    assert s["thresh_pct"] is not None and 0.0 <= s["thresh_pct"] <= 100.0
+
+    # nan/inf dropped
+    s2 = summarize(torch.tensor([float("nan"), 1.0, float("inf")]), None)
+    assert s2["n"] == 1 and s2["max"] == 1.0 and s2["frac_over"] is None
+
+    # snapshot clamps denom (never-observed -> 0, not NaN), like training does
+    lg = GradStatsLogger(threshold=0.5)
+    row = lg.snapshot(torch.tensor([1.0, 0.0]), torch.tensor([2, 0]), iteration=100)
+    assert row["iter"] == 100 and row["n"] == 2
+    assert abs(row["frac_over"] - 0.5) < 1e-9, f"frac_over={row['frac_over']}"
+
+    lg.observe_iter(torch.tensor([0.1, 0.2, 0.3]), 100)
+    assert lg.iters[-1][0] == 100 and lg.iters[-1][1] == 3
+    assert lg.to_dict()["threshold"] == 0.5
+    print("PASS grad_stats algebra")
 
 
 # --------------------------------------------------------------------------- #
@@ -261,6 +290,7 @@ if __name__ == "__main__":
     _run(test_deterministic_split_removed)
     _run(test_densify_event_logging_wired)
     _run(test_vanilla_densify_log_module)
+    _run(test_grad_stats_algebra)
     _run(test_seg_hist_readout_algebra)
     _run(test_tracker_alignment_cpu)
     if not torch.cuda.is_available():
