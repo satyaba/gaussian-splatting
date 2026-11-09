@@ -24,6 +24,15 @@ from sgdense.geometric import build_grid, pick_cell_size, grid_knn, reach_height
 from sgdense.texture import class_freq_thres, compute_texture_freq
 from sgdense.densify_tracker import DensifyTracker, TrackerLog, load_events
 from sgdense.grad_stats import GradStatsLogger, summarize
+from sgdense.profiler import (
+    IterProfiler,
+    PHASES,
+    parse_iters,
+    summarize_profile,
+    load_profile,
+    compare_profiles,
+    format_comparison,
+)
 from sgdense.viz import (
     plot_timeline,
     plot_conditions,
@@ -58,6 +67,13 @@ __all__ = [
     "load_events",
     "GradStatsLogger",
     "summarize",
+    "IterProfiler",
+    "PHASES",
+    "parse_iters",
+    "summarize_profile",
+    "load_profile",
+    "compare_profiles",
+    "format_comparison",
     "plot_timeline",
     "plot_conditions",
     "plot_prune_breakdown",

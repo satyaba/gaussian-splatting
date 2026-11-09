@@ -89,6 +89,27 @@ at each densification event plus the fraction at/over `densify_grad_threshold`
 to test whether an added loss term raises the gradient Gaussians see (and thus
 densification), ideally against a `--lambda_seg 0` ablation.
 
+### Per-iteration cost profiling (SGDense vs vanilla)
+
+`experiments/profile.py` runs both methods for a short profile window and prints
+the per-phase cost breakdown (render / loss / backward / densify / optimizer /
+misc) plus the SGDense-minus-vanilla delta — i.e. the extra per-iteration compute
+our method adds. See `docs/07-iteration-profiler.md`.
+
+```bash
+# run both + compare (rasterizer swaps between them automatically)
+python -m experiments.profile --iterations 4200 --profile-iters 3999:4099
+
+# compare two existing profiles
+python -m experiments.profile --compare \
+    --sgdense-json  <model>/iter_profile.json \
+    --vanilla-json  <model>/iter_profile.json
+```
+
+Profiles land in `<model_dir>/iter_profile.json` for both methods. The SGDense
+`train.py` accepts `--profile_iterations` (`a:b` / `a,b,c` / `all`) and
+`--profile_out` directly too, so any run can emit one.
+
 ### Running one method directly
 
 ```bash

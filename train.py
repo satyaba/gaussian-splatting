@@ -23,6 +23,7 @@ from scene.segmentation_decoder import SegmentationDecoder, save_decoder_checkpo
 from utils.general_utils import safe_state, get_expon_lr_func
 from sgdense.config import DensificationConfig
 from sgdense.categories import generate_category_masks
+from sgdense.profiler import IterProfiler
 import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr
@@ -46,7 +47,8 @@ try:
 except:
     SPARSE_ADAM_AVAILABLE = False
 
-def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
+def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from,
+             profile_iterations=None, profile_out=None):
 
     if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
         sys.exit(f"Trying to use sparse adam but it is not installed, please install the correct rasterizer using pip install [3dgs_accel].")
@@ -162,6 +164,16 @@ def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations,
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
+    # Per-iteration phase profiler (opt-in via --profile_iterations / $SGDENSE_PROFILE_ITERS).
+    # Disabled => every phase()/start()/stop() is a no-op.
+    profiler = IterProfiler(
+        profile_iterations,
+        out_path=profile_out or os.path.join(dataset.model_path, "iter_profile.json"),
+        method="sgdense",
+    )
+    if profiler.enabled:
+        print(f"[SGDense] iteration profiling ON (spec={profiler.spec}) -> {profiler.out_path}")
+
     iter_start = torch.cuda.Event(enable_timing = True)
     iter_end = torch.cuda.Event(enable_timing = True)
 
@@ -198,6 +210,8 @@ def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations,
 
         iter_start.record()
 
+        profiler.begin_iteration(iteration, n_gaussians=int(gaussians.get_xyz.shape[0]))
+
         gaussians.update_learning_rate(iteration)
 
         # Warmup freeze ends here: unfreeze properties + seg_hist so density
@@ -223,67 +237,70 @@ def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations,
 
         bg = torch.rand((3), device="cuda") if opt.random_background else background
 
-        render_pkg = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE, num_segmentation_classes=dataset.num_segmentation_classes)
-        image, viewspace_point_tensor, visibility_filter, radii, seg_votes = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"], render_pkg["seg_votes"]
+        with profiler.phase("render"):
+            render_pkg = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE, num_segmentation_classes=dataset.num_segmentation_classes)
+            image, viewspace_point_tensor, visibility_filter, radii, seg_votes = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"], render_pkg["seg_votes"]
 
-        if viewpoint_cam.alpha_mask is not None:
-            alpha_mask = viewpoint_cam.alpha_mask.cuda()
-            image *= alpha_mask
+        with profiler.phase("loss"):
+            if viewpoint_cam.alpha_mask is not None:
+                alpha_mask = viewpoint_cam.alpha_mask.cuda()
+                image *= alpha_mask
 
-        # Loss
-        gt_image = viewpoint_cam.original_image.cuda()
-        Ll1 = l1_loss(image, gt_image)
-        if FUSED_SSIM_AVAILABLE:
-            ssim_value = fused_ssim(image.unsqueeze(0), gt_image.unsqueeze(0))
-        else:
-            ssim_value = ssim(image, gt_image)
+            # Loss
+            gt_image = viewpoint_cam.original_image.cuda()
+            Ll1 = l1_loss(image, gt_image)
+            if FUSED_SSIM_AVAILABLE:
+                ssim_value = fused_ssim(image.unsqueeze(0), gt_image.unsqueeze(0))
+            else:
+                ssim_value = ssim(image, gt_image)
 
-        # SGDense photo-weight ramp: the photo term is suppressed during the seg
-        # warmup, then ramps back to full weight over ~10x the warmup length.
-        photo_weight = 0.0
-        if iteration > opt.seg_warmup_iters:
-            new_ph_weight = (iteration // opt.seg_warmup_iters) / 10
-            photo_weight = new_ph_weight if new_ph_weight <= 1.0 else 1.0
-        if tb_writer:
-            tb_writer.add_scalar("L_photo weight", photo_weight, iteration)
+            # SGDense photo-weight ramp: the photo term is suppressed during the seg
+            # warmup, then ramps back to full weight over ~10x the warmup length.
+            photo_weight = 0.0
+            if iteration > opt.seg_warmup_iters:
+                new_ph_weight = (iteration // opt.seg_warmup_iters) / 10
+                photo_weight = new_ph_weight if new_ph_weight <= 1.0 else 1.0
+            if tb_writer:
+                tb_writer.add_scalar("L_photo weight", photo_weight, iteration)
 
-        photo_loss_t = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
-        photo_loss_value = photo_loss_t.item()   # unweighted photometric objective, for seg/photo ratio
-        loss = photo_weight * photo_loss_t
+            photo_loss_t = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+            photo_loss_value = photo_loss_t.item()   # unweighted photometric objective, for seg/photo ratio
+            loss = photo_weight * photo_loss_t
 
-        # Depth regularization
-        Ll1depth_pure = 0.0
-        if depth_l1_weight(iteration) > 0 and viewpoint_cam.depth_reliable:
-            invDepth = render_pkg["depth"]
-            mono_invdepth = viewpoint_cam.invdepthmap.cuda()
-            depth_mask = viewpoint_cam.depth_mask.cuda()
+            # Depth regularization
+            Ll1depth_pure = 0.0
+            if depth_l1_weight(iteration) > 0 and viewpoint_cam.depth_reliable:
+                invDepth = render_pkg["depth"]
+                mono_invdepth = viewpoint_cam.invdepthmap.cuda()
+                depth_mask = viewpoint_cam.depth_mask.cuda()
 
-            Ll1depth_pure = torch.abs((invDepth  - mono_invdepth) * depth_mask).mean()
-            Ll1depth = depth_l1_weight(iteration) * Ll1depth_pure
-            loss += Ll1depth
-            Ll1depth = Ll1depth.item()
-        else:
-            Ll1depth = 0
+                Ll1depth_pure = torch.abs((invDepth  - mono_invdepth) * depth_mask).mean()
+                Ll1depth = depth_l1_weight(iteration) * Ll1depth_pure
+                loss += Ll1depth
+                Ll1depth = Ll1depth.item()
+            else:
+                Ll1depth = 0
 
-        # Segmentation decode — AFTER rasterization, in the training loop (the
-        # decoder compares decoded outputs across cameras for L_consist later).
-        rendered_seg = render_pkg["rendered_seg"]                       # [NUM_SEG_CHANNELS, H, W]
-        seg_logits = decoder(rendered_seg.permute(1, 2, 0))             # [H, W, num_segmentation_classes]
-        gt_segmentation = getattr(viewpoint_cam, "gt_segmentation", None)
-        Ll1seg = 0.0
-        seg_ce_raw = None
-        if gt_segmentation is not None:
-            seg_ce_raw = torch.nn.functional.cross_entropy(
-                seg_logits.reshape(-1, dataset.num_segmentation_classes),
-                gt_segmentation.cuda().reshape(-1).long(),
-                ignore_index=-1)  # void rule v1: ignore pixels labeled 255
-            L_seg = opt.lambda_seg * seg_ce_raw
-            loss = loss + L_seg
-            Ll1seg = L_seg.item()
-        for param_group in decoder_optimizer.param_groups:
-            param_group['lr'] = get_decoder_lr(iteration)
+            # Segmentation decode — AFTER rasterization, in the training loop (the
+            # decoder compares decoded outputs across cameras for L_consist later).
+            rendered_seg = render_pkg["rendered_seg"]                       # [NUM_SEG_CHANNELS, H, W]
+            seg_logits = decoder(rendered_seg.permute(1, 2, 0))             # [H, W, num_segmentation_classes]
+            gt_segmentation = getattr(viewpoint_cam, "gt_segmentation", None)
+            Ll1seg = 0.0
+            seg_ce_raw = None
+            if gt_segmentation is not None:
+                seg_ce_raw = torch.nn.functional.cross_entropy(
+                    seg_logits.reshape(-1, dataset.num_segmentation_classes),
+                    gt_segmentation.cuda().reshape(-1).long(),
+                    ignore_index=-1)  # void rule v1: ignore pixels labeled 255
+                L_seg = opt.lambda_seg * seg_ce_raw
+                loss = loss + L_seg
+                Ll1seg = L_seg.item()
+            for param_group in decoder_optimizer.param_groups:
+                param_group['lr'] = get_decoder_lr(iteration)
 
-        loss.backward()
+        with profiler.phase("backward"):
+            loss.backward()
 
         iter_end.record()
 
@@ -329,12 +346,19 @@ def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations,
             # Densification — suppressed during the warmup freeze (doc 03 §3.4):
             # also disables prune, add_densification_stats and reset_opacity,
             # whose optimizer rewrites re-enable requires_grad and mutate values.
+            # Profiling note: the per-iteration add_densification_stats below is
+            # common to vanilla and SGDense, so the "densify" phase times only the
+            # periodic densification EVENT (readout -> masks -> prune) and the
+            # opacity reset — matching the vanilla shim.
+            densify_ran = False
             if iteration < opt.densify_until_iter and iteration > opt.seg_warmup_iters:
                 # Keep track of max radii in image-space for pruning
                 gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
                 gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
 
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
+                    densify_ran = True
+                    profiler.start("densify")
                     if densify_tracker is not None:
                         densify_tracker.step = iteration
                     # Read M BEFORE any lifecycle call — densification mutates the
@@ -385,11 +409,15 @@ def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations,
                                                 size_threshold, radii, cfg=cfg, s_tilde=s_tilde,
                                                 interior_mask=interior_mask_t, boundary_mask=boundary_mask_t,
                                                 floater_mask=floaters_mask_t, other_mask=other_mask_t)
+                    profiler.stop("densify")
 
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
+                    densify_ran = True
+                    profiler.start("densify")
                     if densify_tracker is not None:
                         densify_tracker.step = iteration
                     gaussians.reset_opacity()
+                    profiler.stop("densify")
 
                 # Close the event once per iteration (no-op when nothing happened);
                 # also verifies the tracked ids still match the live population.
@@ -398,22 +426,26 @@ def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations,
 
             # Optimizer step
             if iteration < opt.iterations:
-                gaussians.exposure_optimizer.step()
-                gaussians.exposure_optimizer.zero_grad(set_to_none = True)
-                if use_sparse_adam:
-                    visible = radii > 0
-                    gaussians.optimizer.step(visible, radii.shape[0])
-                    gaussians.optimizer.zero_grad(set_to_none = True)
-                else:
-                    gaussians.optimizer.step()
-                    gaussians.optimizer.zero_grad(set_to_none = True)
-                decoder_optimizer.step()
-                decoder_optimizer.zero_grad(set_to_none = True)
+                with profiler.phase("optimizer"):
+                    gaussians.exposure_optimizer.step()
+                    gaussians.exposure_optimizer.zero_grad(set_to_none = True)
+                    if use_sparse_adam:
+                        visible = radii > 0
+                        gaussians.optimizer.step(visible, radii.shape[0])
+                        gaussians.optimizer.zero_grad(set_to_none = True)
+                    else:
+                        gaussians.optimizer.step()
+                        gaussians.optimizer.zero_grad(set_to_none = True)
+                    decoder_optimizer.step()
+                    decoder_optimizer.zero_grad(set_to_none = True)
 
             if (iteration in checkpoint_iterations):
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
                 save_decoder_checkpoint(decoder, decoder_optimizer, iteration, scene.model_path + f"/decoder{iteration}.pth")
+
+            profiler.end_iteration(densify=densify_ran,
+                                   warmup=iteration <= opt.seg_warmup_iters)
 
     # Persist the densification policy for reproducibility / downstream scripts.
     with open(os.path.join(dataset.model_path, "experiment_config.json"), "w") as f:
@@ -426,6 +458,10 @@ def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations,
         grad_path = os.path.join(dataset.model_path, "grad_stats.json")
         grad_logger.save(grad_path)
         print(f"[SGDense] wrote gradient stats -> {grad_path}")
+    if profiler.enabled:
+        prof_path = profiler.save()
+        if prof_path:
+            print(f"[SGDense] wrote iteration profile -> {prof_path}")
     if tb_writer:
         tb_writer.flush()
         tb_writer.close()
@@ -514,6 +550,15 @@ if __name__ == "__main__":
     parser.add_argument('--disable_viewer', action='store_true', default=False)
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default = None)
+    # Per-iteration phase profiling (see sgdense/profiler.py). Off by default;
+    # default also honours $SGDENSE_PROFILE_ITERS / $SGDENSE_PROFILE_OUT so the
+    # experiment harness can enable it without editing the command.
+    parser.add_argument("--profile_iterations", type=str,
+                        default=os.environ.get("SGDENSE_PROFILE_ITERS"),
+                        help="iterations to profile: 'a:b' range, 'a,b,c' set, or 'all'")
+    parser.add_argument("--profile_out", type=str,
+                        default=os.environ.get("SGDENSE_PROFILE_OUT"),
+                        help="where to write iter_profile.json (default <model_path>/iter_profile.json)")
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
 
@@ -526,7 +571,8 @@ if __name__ == "__main__":
     if not args.disable_viewer:
         network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
-    training(lp.extract(args), op.extract(args), pp.extract(args), sp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
+    training(lp.extract(args), op.extract(args), pp.extract(args), sp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from,
+             profile_iterations=args.profile_iterations, profile_out=args.profile_out)
 
     # All done
     print("\nTraining complete.")
