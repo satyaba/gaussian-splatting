@@ -22,6 +22,7 @@ __all__ = [
     "extract_one",
     "extract_run",
     "extract_all",
+    "extract_sanity",
 ]
 
 
@@ -31,7 +32,10 @@ def __getattr__(name):
     if name in {"prepare", "build_train_cmd", "run_method", "workdir_for"}:
         from experiments import runner
         return getattr(runner, name)
-    if name in {"extract_one", "extract_run", "extract_all"}:
+    if name in {"extract_one", "extract_run", "extract_all", "extract_sanity"}:
         from experiments import metrics
         return getattr(metrics, name)
+    if name in {"RUNS", "run_all", "run_by_id", "run_sanity"}:
+        from experiments import runs
+        return getattr(runs, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

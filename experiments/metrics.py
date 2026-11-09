@@ -144,10 +144,19 @@ def extract_run(run_id: str, *, csv_path: Optional[str | Path] = None,
 def extract_all(*, csv_path: Optional[str | Path] = None,
                 home_dir: Optional[str] = None, workdir_root: str = "/content",
                 skip_prepare: bool = False, dry: bool = False) -> List[Optional[dict]]:
-    from experiments.runs import RUNS
-    return [extract_run(rid, csv_path=csv_path, home_dir=home_dir,
+    from experiments.runs import full_runs
+    return [extract_run(spec.run_id, csv_path=csv_path, home_dir=home_dir,
                         workdir_root=workdir_root, skip_prepare=skip_prepare, dry=dry)
-            for rid in RUNS]
+            for spec in full_runs()]
+
+
+def extract_sanity(*, csv_path: Optional[str | Path] = None,
+                   home_dir: Optional[str] = None, workdir_root: str = "/content",
+                   skip_prepare: bool = False, dry: bool = False) -> List[Optional[dict]]:
+    from experiments.runs import sanity_runs
+    return [extract_run(spec.run_id, csv_path=csv_path, home_dir=home_dir,
+                        workdir_root=workdir_root, skip_prepare=skip_prepare, dry=dry)
+            for spec in sanity_runs()]
 
 
 def _default_csv() -> Optional[str]:
@@ -159,7 +168,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p = argparse.ArgumentParser(description="Extract metrics into a results CSV.")
     g = p.add_mutually_exclusive_group(required=True)
     g.add_argument("--run-id", help="a run id from experiments.runs")
-    g.add_argument("--all", action="store_true", help="every run in the manifest")
+    g.add_argument("--all", action="store_true", help="every non-sanity run in the manifest")
+    g.add_argument("--sanity", action="store_true", help="the short sanity runs only")
     g.add_argument("--model-dir", help="evaluate an arbitrary model dir")
     p.add_argument("--iteration", type=int, default=-1)
     p.add_argument("--name", default=None)
@@ -178,6 +188,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
               dry=args.dry_run)
     if args.all:
         extract_all(**kw)
+    elif args.sanity:
+        extract_sanity(**kw)
     elif args.run_id:
         extract_run(args.run_id, **kw)
     else:

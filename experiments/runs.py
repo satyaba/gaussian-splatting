@@ -40,6 +40,7 @@ class RunSpec:
     images: Optional[str] = None
     seg_num_classes: Optional[int] = None   # set for SGDense runs (adds seg args)
     extra: Tuple[str, ...] = ()
+    sanity: bool = False                    # short smoke test (not a result run)
     notes: str = ""
 
 
@@ -65,8 +66,35 @@ RUNS: Dict[str, RunSpec] = {
             extra=("--floater_action", "freeze"),
             notes="Level-2 floaters, frozen (L1+L2 on, no texture/position routes).",
         ),
+        # --- sanity runs: same configs, 3_000 iters. Enough to cross the seg
+        # warmup (2000), run densification + floater/freeze, hit the opacity
+        # reset (3000) and save. Use to verify the pipeline runs end-to-end. ---
+        RunSpec(
+            run_id="vanilla_sanity",
+            method="vanilla_3dgs",
+            iterations=3_000,
+            sanity=True,
+            notes="SANITY: upstream 3DGS @3k.",
+        ),
+        RunSpec(
+            run_id="run38_sanity",
+            method="sgdense",
+            iterations=3_000,
+            seg_num_classes=99,
+            extra=("--floater_action", "freeze"),
+            sanity=True,
+            notes="SANITY: SGDense run38 @3k (exercises warmup+densify+freeze+reset).",
+        ),
     )
 }
+
+
+def full_runs() -> List[RunSpec]:
+    return [r for r in RUNS.values() if not r.sanity]
+
+
+def sanity_runs() -> List[RunSpec]:
+    return [r for r in RUNS.values() if r.sanity]
 
 
 # --------------------------------------------------------------------------- #
@@ -133,8 +161,15 @@ def run_by_id(run_id: str, **kw) -> Path:
 
 
 def run_all(**kw) -> None:
-    for run_id in RUNS:
-        run_by_id(run_id, **kw)
+    """Run every non-sanity run in the manifest."""
+    for spec in full_runs():
+        run(spec, **kw)
+
+
+def run_sanity(**kw) -> None:
+    """Run the short sanity runs only."""
+    for spec in sanity_runs():
+        run(spec, **kw)
 
 
 # --------------------------------------------------------------------------- #
@@ -145,7 +180,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     g = p.add_mutually_exclusive_group(required=True)
     g.add_argument("--list", action="store_true", help="list runs and exit")
     g.add_argument("--run", metavar="RUN_ID", help="run one run id")
-    g.add_argument("--all", action="store_true", help="run every run")
+    g.add_argument("--all", action="store_true", help="run every non-sanity run")
+    g.add_argument("--sanity", action="store_true", help="run the short sanity runs only")
     p.add_argument("--home-dir", default=os.environ.get("HOME_DIR"))
     p.add_argument("--dataset-root", default=os.environ.get("DATASET_ROOT"),
                    help="override the root above per-run <dataset> folders")
@@ -157,14 +193,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if args.list:
         for r in RUNS.values():
-            print(f"{r.run_id:16s} method={r.method:12s} iters={r.iterations:<6d} "
+            tag = "sanity" if r.sanity else "full"
+            print(f"[{tag:6s}] {r.run_id:16s} method={r.method:12s} iters={r.iterations:<6d} "
                   f"dataset={r.dataset}  {r.notes}")
         return 0
 
     kw = dict(home_dir=args.home_dir, dataset_root=args.dataset_root,
               workdir_root=args.workdir_root, force=args.force,
               skip_prepare=args.skip_prepare, dry=args.dry_run)
-    if args.all:
+    if args.sanity:
+        run_sanity(**kw)
+    elif args.all:
         run_all(**kw)
     else:
         run_by_id(args.run, **kw)

@@ -33,17 +33,27 @@ export SEG_DIR=$DATASET_DIR/semantic_class
 `experiments/runs.py` declares the runs; one command executes them:
 
 ```bash
-python -m experiments.runs --list          # show runs
-python -m experiments.runs --run run38_30k # one run
-python -m experiments.runs --all           # every run
+python -m experiments.runs --list           # show runs
+python -m experiments.runs --sanity         # short smoke runs (verify the pipeline)
+python -m experiments.runs --run run38_30k  # one run
+python -m experiments.runs --all            # every non-sanity run
 ```
 
-Current 30k runs:
+Runs:
 
-| run id | method | notes |
-|---|---|---|
-| `vanilla_30k` | `vanilla_3dgs` | upstream graphdeco 3DGS (stock rasterizer), `--eval` |
-| `run38_30k` | `sgdense` | L1+L2 floaters, `FLOATER_ACTION=freeze`, no texture/position routes |
+| run id | method | iters | notes |
+|---|---|---|---|
+| `vanilla_30k` | `vanilla_3dgs` | 30000 | upstream graphdeco 3DGS (stock rasterizer), `--eval` |
+| `run38_30k` | `sgdense` | 30000 | L1+L2 floaters, `FLOATER_ACTION=freeze`, no texture/position routes |
+| `vanilla_sanity` | `vanilla_3dgs` | 3000 | SANITY smoke test |
+| `run38_sanity` | `sgdense` | 3000 | SANITY smoke test |
+
+The **sanity runs** reuse the exact full-run configs at 3 000 iterations — enough
+to cross the seg warmup (2000), run densification with floater/freeze handling,
+hit the opacity reset (3000), and save. Use them to verify the whole pipeline
+(train → rasterizer swap → metric extraction) before committing to 30 000 iters.
+`--all` / `extract_all()` skip sanity runs; `--sanity` / `extract_sanity()` run
+only them.
 
 Add a run by appending a `RunSpec` to `RUNS` (set `seg_num_classes` for SGDense
 runs to auto-add `--segmentation_path` / `--num_segmentation_classes`).
@@ -123,7 +133,8 @@ count** — the same quantities reported by `SGDense_3DGS_Experiment.ipynb`.
 
 ```bash
 python -m experiments.metrics --run-id run38_30k       # one run
-python -m experiments.metrics --all                    # every run in the manifest
+python -m experiments.metrics --sanity                 # the short sanity runs
+python -m experiments.metrics --all                    # every non-sanity run
 python -m experiments.metrics --model-dir <path> --name "adhoc" --iteration 30000
 ```
 
