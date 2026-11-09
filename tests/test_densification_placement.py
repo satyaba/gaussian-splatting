@@ -72,6 +72,17 @@ def test_deterministic_split_removed():
     print("PASS deterministic split fully removed")
 
 
+def test_densify_event_logging_wired():
+    gm, arg, tr = open(GM).read(), open(ARG).read(), open(TRAIN).read()
+    assert "log_densify_events" in arg, "arguments: --log_densify_events missing"
+    assert "set_densify_tracker" in gm, "gaussian_model: set_densify_tracker missing"
+    for hook in ("on_clone", "on_split", "on_prune", "on_reset"):
+        assert hook in gm, f"gaussian_model does not fire tracker hook {hook}"
+    assert "DensifyTracker" in tr, "train.py does not construct a DensifyTracker"
+    assert "densify_events.pt" in tr, "train.py does not save densify_events.pt"
+    print("PASS densify-event logging wired (model hooks + train.py save)")
+
+
 # --------------------------------------------------------------------------- #
 # seg_hist_readout 6-tuple algebra (pure torch, CPU)                           #
 # --------------------------------------------------------------------------- #
@@ -89,6 +100,95 @@ def test_seg_hist_readout_algebra():
     # Zero-evidence row -> P == 0 -> equal top-2, maximal disagree.
     assert torch.allclose(top2[1], torch.zeros(2)), "zero-evidence row must give P == 0"
     print("PASS seg_hist_readout algebra")
+
+
+# --------------------------------------------------------------------------- #
+# DensifyTracker id-alignment across the clone/split/prune protocol (CPU)       #
+# --------------------------------------------------------------------------- #
+class _FakeModel:
+    """Minimal stand-in exposing exactly what DensifyTracker reads."""
+
+    def __init__(self, P, C):
+        self._xyz = torch.randn(P, 3)
+        self._scaling = torch.randn(P, 3)
+        self._opacity = torch.randn(P, 1)
+        self.seg_hist = torch.rand(P, C)
+        self.max_radii2D = torch.rand(P)
+
+    @property
+    def get_xyz(self):
+        return self._xyz
+
+    @property
+    def get_scaling(self):
+        return torch.exp(self._scaling)
+
+    @property
+    def get_opacity(self):
+        return torch.sigmoid(self._opacity)
+
+    def append_rows(self, k):   # emulate densification_postfix
+        self._xyz = torch.cat([self._xyz, torch.randn(k, 3)])
+        self._scaling = torch.cat([self._scaling, torch.randn(k, 3)])
+        self._opacity = torch.cat([self._opacity, torch.randn(k, 1)])
+        self.seg_hist = torch.cat([self.seg_hist, torch.rand(k, self.seg_hist.shape[1])])
+        self.max_radii2D = torch.cat([self.max_radii2D, torch.rand(k)])
+
+    def drop_rows(self, mask):  # emulate prune_points
+        keep = ~mask
+        self._xyz = self._xyz[keep]
+        self._scaling = self._scaling[keep]
+        self._opacity = self._opacity[keep]
+        self.seg_hist = self.seg_hist[keep]
+        self.max_radii2D = self.max_radii2D[keep]
+
+
+def test_tracker_alignment_cpu():
+    from sgdense.densify_tracker import DensifyTracker
+
+    torch.manual_seed(0)
+    P, C = 6, 3
+    m = _FakeModel(P, C)
+    tr = DensifyTracker(m)
+    assert tr.gid.tolist() == list(range(P)), "initial ids must be 0..P-1"
+
+    # clone: parents stay, k duplicates appended at the tail
+    sel = torch.tensor([True, False, False, True, False, False])
+    k = int(sel.sum())
+    m.append_rows(k)
+    tr.on_clone(sel, torch.rand(P), m.get_xyz[P:P + k])
+    assert tr.gid.shape[0] == P + k, "clone must append k ids"
+    assert tr.gid[:P].tolist() == list(range(P)), "clone must not reorder parents"
+    assert tr.gid[P:].tolist() == list(range(P, P + k)), "clone children get fresh ids"
+
+    # split: N children per selected parent appended, parents removed
+    P2 = int(m.get_xyz.shape[0])
+    sel2 = torch.zeros(P2, dtype=torch.bool)
+    sel2[0] = True
+    sel2[P2 - 1] = True
+    k2 = int(sel2.sum()) * 2
+    survivors = tr.gid[:P2][~sel2].tolist()
+    m.append_rows(k2)
+    tr.on_split(sel2, torch.rand(P2), m.get_xyz[P2:P2 + k2], N=2)
+    assert tr.gid.shape[0] == P2 - int(sel2.sum()) + k2, "split must drop parents"
+    assert tr.gid[:len(survivors)].tolist() == survivors, "split must keep survivors in order"
+    assert tr.gid[len(survivors):].tolist() == list(range(tr.next_id - k2, tr.next_id)), \
+        "split children get fresh ids in parent order"
+
+    # prune: drop rows, ids follow the survivors
+    Pm = int(m.get_xyz.shape[0])
+    pmask = torch.zeros(Pm, dtype=torch.bool)
+    pmask[0] = True
+    expect = tr.gid[:Pm][~pmask].tolist()
+    m.drop_rows(pmask)
+    tr.on_prune(pmask, reason="test")
+    assert tr.gid.tolist() == expect, "prune must drop exactly the masked ids"
+
+    # flush closes the event and agrees with the live population
+    tr.flush(100)
+    assert len(tr.summary) == 1, "one event must be recorded"
+    assert tr.summary[0]["n"] == int(m.get_xyz.shape[0]), "flush must match live N"
+    print("PASS DensifyTracker id alignment (clone/split/prune/flush)")
 
 
 # --------------------------------------------------------------------------- #
@@ -148,7 +248,9 @@ if __name__ == "__main__":
     _run(test_py_compile_edited_files)
     _run(test_sgdense_sources_present_or_skip)
     _run(test_deterministic_split_removed)
+    _run(test_densify_event_logging_wired)
     _run(test_seg_hist_readout_algebra)
+    _run(test_tracker_alignment_cpu)
     if not torch.cuda.is_available():
         print("SKIP GPU tests (no CUDA on this host)")
     else:

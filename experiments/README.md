@@ -58,6 +58,17 @@ only them.
 Add a run by appending a `RunSpec` to `RUNS` (set `seg_num_classes` for SGDense
 runs to auto-add `--segmentation_path` / `--num_segmentation_classes`).
 
+### Densification event log (SGDense runs)
+
+SGDense runs configured with `--log_densify_events` (currently `run38_30k` and
+`run38_sanity`) attach a `sgdense.DensifyTracker` in `train.py` and write
+`<model_dir>/densify_events.pt` — one record per densification event with the
+clone/split/prune selections, prune reasons, per-Gaussian stable ids + population,
+and a decimated per-event point snapshot. Load it with `sgdense.load_events(path)`
+and analyse/plot with `sgdense.viz` (`plot_timeline`, `plot_prune_breakdown`,
+`plotly_replay`, `save_report`). The flag is off by default, so ordinary runs pay
+only one `is not None` check per lifecycle call.
+
 ### Running one method directly
 
 ```bash

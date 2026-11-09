@@ -63,7 +63,7 @@ RUNS: Dict[str, RunSpec] = {
             method="sgdense",
             iterations=30_000,
             seg_num_classes=99,
-            extra=("--floater_action", "freeze"),
+            extra=("--floater_action", "freeze", "--log_densify_events"),
             notes="Level-2 floaters, frozen (L1+L2 on, no texture/position routes).",
         ),
         # --- sanity runs: same configs, 3_000 iters. Enough to cross the seg
@@ -81,7 +81,7 @@ RUNS: Dict[str, RunSpec] = {
             method="sgdense",
             iterations=3_000,
             seg_num_classes=99,
-            extra=("--floater_action", "freeze"),
+            extra=("--floater_action", "freeze", "--log_densify_events"),
             sanity=True,
             notes="SANITY: SGDense run38 @3k (exercises warmup+densify+freeze+reset).",
         ),

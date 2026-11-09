@@ -62,6 +62,7 @@ class GaussianModel:
         self.seg_hist_decay = 1.0                  # beta; overwritten in training_setup
         self.seg_hist_inherit_discount = 1.0       # c; overwritten in training_setup
         self.seg_hist_frozen = False               # warmup: suppress M writes (set via set_gaussian_properties_trainable)
+        self._densify_tracker = None               # optional sgdense DensifyTracker; None = no event logging
         self._xyz = torch.empty(0)
         self._features_dc = torch.empty(0)
         self._features_rest = torch.empty(0)
@@ -330,6 +331,8 @@ class GaussianModel:
         opacities_new = self.inverse_opacity_activation(torch.min(self.get_opacity, torch.ones_like(self.get_opacity)*0.01))
         optimizable_tensors = self.replace_tensor_to_optimizer(opacities_new, "opacity")
         self._opacity = optimizable_tensors["opacity"]
+        if self._densify_tracker is not None:
+            self._densify_tracker.on_reset()
 
     def load_ply(self, path, use_train_test_exp = False):
         plydata = PlyData.read(path)
@@ -538,6 +541,18 @@ class GaussianModel:
             return None
         return mask[~prune_filter]
 
+    def set_densify_tracker(self, tracker):
+        """Attach a :class:`sgdense.densify_tracker.DensifyTracker` (or ``None``).
+
+        The tracker keeps a stable id per live row, so it must be attached at a
+        population boundary (before any clone/split/prune) for the lineage to stay
+        aligned. When attached, the lifecycle methods fire the tracker's hooks at
+        the exact points where the selection masks are known; when ``None`` the
+        overhead is a single ``is not None`` check per call.
+        """
+        self._densify_tracker = tracker
+        return tracker
+
     def _gauss_thresh(self, grad_threshold, cfg, s_tilde):
         """Per-Gaussian gradient threshold. TEXTURE_BASED_THRESH scales the scalar
         threshold per class via s_tilde; otherwise a scalar broadcast."""
@@ -559,7 +574,8 @@ class GaussianModel:
         return basic_thresh
 
     def densify_and_split(self, grads, grad_threshold, scene_extent, N=2, dense_weight=1,
-                          sel_mask=None, cfg=None, s_tilde=None, freeze_mask=None):
+                          sel_mask=None, cfg=None, s_tilde=None, freeze_mask=None,
+                          regime="all"):
         n_init_points = self.get_xyz.shape[0]
         # Extract points that satisfy the gradient condition
         padded_grad = torch.zeros((n_init_points), device="cuda")
@@ -597,6 +613,12 @@ class GaussianModel:
 
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_seg_encoding, new_tmp_radii, new_seg_hist)
 
+        # Log BEFORE prune_points (below) removes the parents: the tracker rebuilds
+        # the post-split ordering (survivors ++ children) itself.
+        if self._densify_tracker is not None:
+            self._densify_tracker.on_split(selected_pts_mask, padded_grad, new_xyz,
+                                           N=N, regime=regime)
+
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
         n_children = int(new_xyz.shape[0])
 
@@ -604,7 +626,8 @@ class GaussianModel:
         return prune_filter, n_children
 
     def densify_and_clone(self, grads, grad_threshold, scene_extent, dense_weight=1,
-                          sel_mask=None, cfg=None, s_tilde=None, freeze_mask=None):
+                          sel_mask=None, cfg=None, s_tilde=None, freeze_mask=None,
+                          regime="all"):
         # Extract points that satisfy the gradient condition
         n_init_points = self.get_xyz.shape[0]
 
@@ -636,6 +659,10 @@ class GaussianModel:
 
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_seg_encoding, new_tmp_radii, new_seg_hist)
 
+        if self._densify_tracker is not None:
+            self._densify_tracker.on_clone(selected_pts_mask, padded_grad, new_xyz,
+                                           N=1, regime=regime)
+
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, radii,
                           cfg=None, s_tilde=None,
                           interior_mask=None, boundary_mask=None, floater_mask=None, other_mask=None):
@@ -650,6 +677,8 @@ class GaussianModel:
             # prune FIRST, while every mask is index-aligned to the pre-
             # densification population (P_old). Subsetting the survivor masks by
             # ~floater keeps clone/split aligned across the removal.
+            if self._densify_tracker is not None:
+                self._densify_tracker.on_prune(floater_mask, reason="floater")
             self.prune_points(floater_mask)
             keep = ~floater_mask
             interior_mask = interior_mask[keep] if interior_mask is not None else None
@@ -668,12 +697,13 @@ class GaussianModel:
                 "other":    (other_mask, cfg.other_weight),
             }
 
-            for m, t in regimes.values():
+            for name, (m, t) in regimes.items():
                 if m is None:
                     continue
                 m = self._pad_mask(m, self.get_xyz.shape[0])
                 self.densify_and_clone(grads, max_grad, extent,
-                                       dense_weight=t, sel_mask=m, cfg=cfg, s_tilde=s_tilde)
+                                       dense_weight=t, sel_mask=m, cfg=cfg, s_tilde=s_tilde,
+                                       regime=name)
 
             # SPLITS second. Each split removes its parents, shifting indices, so
             # every not-yet-run sibling mask is remapped onto the new ordering.
@@ -684,7 +714,8 @@ class GaussianModel:
                     continue
                 m = self._pad_mask(m, self.get_xyz.shape[0])
                 prune_filter, n_children = self.densify_and_split(
-                    grads, max_grad, extent, dense_weight=t, sel_mask=m, cfg=cfg, s_tilde=s_tilde)
+                    grads, max_grad, extent, dense_weight=t, sel_mask=m, cfg=cfg, s_tilde=s_tilde,
+                    regime=name)
                 for rest in names[i + 1:]:
                     rm, rt = regimes[rest]
                     if rm is None:
@@ -704,6 +735,8 @@ class GaussianModel:
             big_points_vs = self.max_radii2D > max_screen_size
             big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
             prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
+        if self._densify_tracker is not None:
+            self._densify_tracker.on_prune(prune_mask, reason="opacity+size")
         self.prune_points(prune_mask)
         self.tmp_radii = None
 

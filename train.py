@@ -111,6 +111,17 @@ def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations,
         (model_params, first_iter) = torch.load(checkpoint, weights_only=False)
         gaussians.restore(model_params, opt)
 
+    # SGDense densification event logging (opt-in via --log_densify_events):
+    # attach AFTER the population is final (checkpoint restore included) so the
+    # tracker's stable per-row ids stay aligned with the live rows.
+    densify_tracker = None
+    if getattr(sgdense, "log_densify_events", False):
+        from sgdense.densify_tracker import DensifyTracker
+        densify_tracker = DensifyTracker(gaussians, snapshot_max_points=5000)
+        gaussians.set_densify_tracker(densify_tracker)
+        print(f"[SGDense] densification event logging ON; will write "
+              f"{os.path.join(dataset.model_path, 'densify_events.pt')}")
+
     # The rasterizer's channel count is a compile-time constant; keep Python-side
     # config honest about it.
     assert dataset.seg_encoding_dim == 32, "seg_encoding_dim must match NUM_SEG_CHANNELS in cuda_rasterizer/config.h (rebuild required to change)"
@@ -308,6 +319,8 @@ def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations,
                 gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
 
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
+                    if densify_tracker is not None:
+                        densify_tracker.step = iteration
                     # Read M BEFORE any lifecycle call — densification mutates the
                     # population and M in lockstep, so this must come first.
                     consistency, structure, disagree, entropy, top2, S = gaussians.seg_hist_readout()
@@ -347,7 +360,14 @@ def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations,
                                                 floater_mask=floaters_mask_t, other_mask=other_mask_t)
 
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
+                    if densify_tracker is not None:
+                        densify_tracker.step = iteration
                     gaussians.reset_opacity()
+
+                # Close the event once per iteration (no-op when nothing happened);
+                # also verifies the tracked ids still match the live population.
+                if densify_tracker is not None:
+                    densify_tracker.flush(iteration)
 
             # Optimizer step
             if iteration < opt.iterations:
@@ -371,6 +391,10 @@ def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations,
     # Persist the densification policy for reproducibility / downstream scripts.
     with open(os.path.join(dataset.model_path, "experiment_config.json"), "w") as f:
         json.dump(cfg.to_dict(), f, indent=1)
+    if densify_tracker is not None:
+        events_path = os.path.join(dataset.model_path, "densify_events.pt")
+        densify_tracker.save(events_path)
+        print(f"[SGDense] wrote densification events -> {events_path}")
     if tb_writer:
         tb_writer.flush()
         tb_writer.close()

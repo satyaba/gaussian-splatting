@@ -127,6 +127,10 @@ class SGDenseParams(ParamGroup):
         self.position_based_thresh = False
         self.texture_based_thresh = False
         self.texture_based_scale = False
+        # --- densification event logging (sgdense.densify_tracker) ---
+        # Opt-in: when set, train.py attaches a DensifyTracker and writes
+        # <model_path>/densify_events.pt (events + lineage + prune reasons).
+        self.log_densify_events = False
         # --- floater lifecycle ('prune' | 'freeze') ---
         self.floater_action = "prune"
         # --- POSITION_BASED_THRESH per-regime scaling-threshold weights ---
