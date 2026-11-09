@@ -66,6 +66,18 @@ RUNS: Dict[str, RunSpec] = {
             extra=("--floater_action", "freeze", "--log_densify_events", "--log_grad_stats"),
             notes="Level-2 floaters, frozen (L1+L2 on, no texture/position routes).",
         ),
+        # Option A: same as run38_30k but the clone/split trigger accumulates the
+        # photometric(+depth) screen-space gradient only, so the segmentation loss
+        # cannot inflate densification. Keep run38_30k as the total-gradient baseline.
+        RunSpec(
+            run_id="run38_photograd_30k",
+            method="sgdense",
+            iterations=30_000,
+            seg_num_classes=99,
+            extra=("--floater_action", "freeze", "--log_densify_events", "--log_grad_stats",
+                   "--densify_photo_grad_only"),
+            notes="Option A: run38 + densification decoupled from the seg loss.",
+        ),
         # --- sanity runs: same configs, 3_000 iters. Enough to cross the seg
         # warmup (2000), run densification + floater/freeze, hit the opacity
         # reset (3000) and save. Use to verify the pipeline runs end-to-end. ---
@@ -84,6 +96,16 @@ RUNS: Dict[str, RunSpec] = {
             extra=("--floater_action", "freeze", "--log_densify_events", "--log_grad_stats"),
             sanity=True,
             notes="SANITY: SGDense run38 @3k (exercises warmup+densify+freeze+reset).",
+        ),
+        RunSpec(
+            run_id="run38_photograd_sanity",
+            method="sgdense",
+            iterations=3_000,
+            seg_num_classes=99,
+            extra=("--floater_action", "freeze", "--log_densify_events", "--log_grad_stats",
+                   "--densify_photo_grad_only"),
+            sanity=True,
+            notes="SANITY: Option A (photo-only densify) @3k.",
         ),
     )
 }
