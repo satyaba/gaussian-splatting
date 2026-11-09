@@ -61,7 +61,7 @@ def _log(msg: str) -> None:
     print(f"[experiments] {msg}", flush=True)
 
 
-def _sh(cmd: str, cwd: Path, dry: bool, tail: int = 40) -> None:
+def _sh(cmd: str, cwd: Path, dry: bool, tail: int = 40, check: bool = True) -> None:
     """Run a shell command, capturing output so failures are visible.
 
     On non-zero exit the last ``tail`` lines are printed before raising, so the
@@ -76,10 +76,28 @@ def _sh(cmd: str, cwd: Path, dry: bool, tail: int = 40) -> None:
         tail_txt = "\n".join(out.splitlines()[-tail:])
         print(f"[experiments] command failed (exit {p.returncode}); last {tail} lines:\n"
               f"{tail_txt}", flush=True)
-        raise subprocess.CalledProcessError(p.returncode, cmd, output=p.stdout, stderr=p.stderr)
+        if check:
+            raise subprocess.CalledProcessError(p.returncode, cmd, output=p.stdout, stderr=p.stderr)
+        return
     lines = out.splitlines()
     if lines:  # show progress tail on success too
         print("\n".join(lines[-tail:]), flush=True)
+
+
+def _diagnose_rasterizer_build(wd: Path, dry: bool) -> None:
+    """Rebuild the rasterizer via setup.py so the compiler error is visible.
+
+    pip reports a failed CUDA-extension build as the unhelpful *"No available
+    output."*; invoking the build backend directly prints the real nvcc/gcc/ninja
+    error instead.
+    """
+    raster = wd / "submodules" / "diff-gaussian-rasterization"
+    if not (raster / "setup.py").exists():
+        return
+    print("[experiments] install failed — rebuilding directly to surface the real "
+          "compiler error ...", flush=True)
+    _sh("python setup.py build_ext --inplace 2>&1 | tail -120",
+        cwd=raster, dry=dry, tail=120, check=False)
 
 
 def _argv(cmd: Sequence[str], cwd: Path, dry: bool) -> None:
@@ -145,7 +163,11 @@ def prepare(method: Method, workdir_root: str | Path = "/content",
         if last is not None:
             _log(f"rasterizer swap: {last} -> {method.id}")
         for cmd in method.install:
-            _sh(cmd, cwd=wd, dry=dry)
+            try:
+                _sh(cmd, cwd=wd, dry=dry)
+            except subprocess.CalledProcessError:
+                _diagnose_rasterizer_build(wd, dry)
+                raise
         if not dry:
             marker.parent.mkdir(parents=True, exist_ok=True)
             marker.write_text(method.id)

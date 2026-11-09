@@ -58,10 +58,28 @@ class Method:
     notes: str = ""
 
 
+# Ensure <cstdint> is included in the files that need it. CUDA 13 / newer
+# libstdc++ no longer pull it in transitively, so the rasterizer headers fail
+# with `namespace "std" has no member "uintptr_t"` / `identifier "uint32_t" is
+# undefined`. Guarded + idempotent (only inserts when the file exists and does
+# not already include it).
+_CSTDINT_PATCH = (
+    r"""for f in submodules/diff-gaussian-rasterization/cuda_rasterizer/rasterizer_impl.h """
+    r"""submodules/simple-knn/cuda_utils.h submodules/simple-knn/simple_knn.cu; do """
+    r"""if [ -f "$f" ] && ! grep -q 'include <cstdint>' "$f"; then """
+    r"""sed -i '1i #include <cstdint>' "$f"; echo "patched $f"; fi; done"""
+)
+
+
 def _rasterizer_install() -> Tuple[str, ...]:
-    """Uninstall whatever rasterizer is present, then build this method's own."""
+    """Uninstall whatever rasterizer is present, patch, then build this method's own.
+
+    The ``<cstdint>`` patch works for the stock rasterizer, simple-knn, and any
+    fork that lacks the include.
+    """
     return (
         "pip uninstall -y diff-gaussian-rasterization",
+        _CSTDINT_PATCH,
         "pip install ./submodules/diff-gaussian-rasterization --no-build-isolation",
         "pip install ./submodules/simple-knn --no-build-isolation",
     )

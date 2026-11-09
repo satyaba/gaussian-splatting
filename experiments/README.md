@@ -178,11 +178,17 @@ Semantic metrics (pixel-acc / mIoU / fwIoU) are included in the JSON when a
 fail. The runner now prints the **last lines of the build log** before raising, so
 the real cause is visible. Common causes:
 
+- **CUDA 13 / newer libstdc++ dropped the transitive `<cstdint>`** — the
+  rasterizer headers then fail with `namespace "std" has no member "uintptr_t"`
+  and `identifier "uint32_t" is undefined`. The runner patches this automatically:
+  before every rasterizer build it prepends `#include <cstdint>` to
+  `cuda_rasterizer/rasterizer_impl.h` and `simple-knn`'s translation units
+  (guarded + idempotent). Keep this in mind if you point `install` at other code.
 - **Missing `glm`** — the stock `setup.py` hard-includes `third_party/glm/` (a
   nested submodule). The runner force-inits it with
   `git submodule update --init --recursive` inside the rasterizer dir.
 - **Toolchain mismatch** — nvcc's CUDA must match `torch.version.cuda` (see the
-  notebook's CUDA check). Known-good Colab runtime: 2026.10.
+  notebook's CUDA check).
 - **Rasterizer commit incompatible with a very new CUDA/torch** — set
   `rasterizer_ref="3dgs_accel"` on the `vanilla_3dgs` entry in
   `experiments/methods.py` (it is applied after the submodule update, which would
