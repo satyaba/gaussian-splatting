@@ -58,6 +58,16 @@ only them.
 Add a run by appending a `RunSpec` to `RUNS` (set `seg_num_classes` for SGDense
 runs to auto-add `--segmentation_path` / `--num_segmentation_classes`).
 
+### Vanilla event logging
+
+Upstream graphdeco 3DGS has none of this fork's hooks, so
+`Vanilla_3DGS_Experiment.ipynb` instruments the cloned upstream code at runtime
+with `scripts/vanilla_densify_log.py` (monkeypatches `GaussianModel` to fire a
+`DensifyTracker`, env-gated by `SGDENSE_REPO` + `DENSIFY_EVENTS_OUT`). The result
+is the same `densify_events.pt` artifact, so vanilla and SGDense densification
+dynamics can be compared offline with `sgdense.viz`. Vanilla has no
+segmentation, so per-Gaussian `parent_class` is `-1`.
+
 ### Densification event log (SGDense runs)
 
 SGDense runs configured with `--log_densify_events` (currently `run38_30k` and

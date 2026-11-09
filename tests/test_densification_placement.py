@@ -83,6 +83,17 @@ def test_densify_event_logging_wired():
     print("PASS densify-event logging wired (model hooks + train.py save)")
 
 
+def test_vanilla_densify_log_module():
+    path = os.path.join(ROOT, "scripts", "vanilla_densify_log.py")
+    py_compile.compile(path, doraise=True)
+    s = open(path).read()
+    for name in ("densify_and_clone", "densify_and_split", "densification_postfix",
+                 "prune_points", "reset_opacity", "update_learning_rate", "DensifyTracker"):
+        assert name in s, f"vanilla_densify_log does not reference {name}"
+    assert "DENSIFY_EVENTS_OUT" in s, "vanilla_densify_log has no save path env"
+    print("PASS vanilla_densify_log instrumentation module present")
+
+
 # --------------------------------------------------------------------------- #
 # seg_hist_readout 6-tuple algebra (pure torch, CPU)                           #
 # --------------------------------------------------------------------------- #
@@ -249,6 +260,7 @@ if __name__ == "__main__":
     _run(test_sgdense_sources_present_or_skip)
     _run(test_deterministic_split_removed)
     _run(test_densify_event_logging_wired)
+    _run(test_vanilla_densify_log_module)
     _run(test_seg_hist_readout_algebra)
     _run(test_tracker_alignment_cpu)
     if not torch.cuda.is_available():

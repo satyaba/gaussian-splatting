@@ -108,11 +108,16 @@ class DensifyTracker:
 
     def _attrs(self, P: int):
         g = self.g
+        # Upstream graphdeco 3DGS has no seg_hist; substitute a zero-width
+        # histogram so _class_of returns -1 and the event log still works.
+        hist = getattr(g, "seg_hist", None)
+        if hist is None or int(hist.numel()) == 0:
+            hist = torch.zeros(P, 0, device=g.get_xyz.device)
         return (
             g.get_xyz.detach(),
             g.get_scaling.detach().max(dim=1).values,
             g.get_opacity.detach().squeeze(1),
-            g.seg_hist.detach(),
+            hist.detach(),
         )
 
     @staticmethod
