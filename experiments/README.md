@@ -170,6 +170,24 @@ Semantic metrics (pixel-acc / mIoU / fwIoU) are included in the JSON when a
   iterations, same code).
 - For visual grids, run `eval_sgdense.py --out_dir <dir>` directly.
 
+## Troubleshooting
+
+### External rasterizer build fails
+
+`pip install ./submodules/diff-gaussian-rasterization` for an external method can
+fail. The runner now prints the **last lines of the build log** before raising, so
+the real cause is visible. Common causes:
+
+- **Missing `glm`** — the stock `setup.py` hard-includes `third_party/glm/` (a
+  nested submodule). The runner force-inits it with
+  `git submodule update --init --recursive` inside the rasterizer dir.
+- **Toolchain mismatch** — nvcc's CUDA must match `torch.version.cuda` (see the
+  notebook's CUDA check). Known-good Colab runtime: 2026.10.
+- **Rasterizer commit incompatible with a very new CUDA/torch** — set
+  `rasterizer_ref="3dgs_accel"` on the `vanilla_3dgs` entry in
+  `experiments/methods.py` (it is applied after the submodule update, which would
+  otherwise reset the checkout). Re-run with `force=True` (CLI `--force`) to rebuild.
+
 ## Reproducibility
 
 Pin `Method.ref` (a tag or commit SHA) once you settle on a baseline version.

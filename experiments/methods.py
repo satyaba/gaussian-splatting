@@ -54,6 +54,7 @@ class Method:
     entry: str = "train.py"
     common_args: Tuple[str, ...] = ()
     uses_seg_rasterizer: bool = False
+    rasterizer_ref: Optional[str] = None   # branch/sha to check out in the rasterizer submodule
     notes: str = ""
 
 

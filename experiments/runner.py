@@ -61,11 +61,25 @@ def _log(msg: str) -> None:
     print(f"[experiments] {msg}", flush=True)
 
 
-def _sh(cmd: str, cwd: Path, dry: bool) -> None:
+def _sh(cmd: str, cwd: Path, dry: bool, tail: int = 40) -> None:
+    """Run a shell command, capturing output so failures are visible.
+
+    On non-zero exit the last ``tail`` lines are printed before raising, so the
+    real cause (e.g. a missing ``glm`` header) is not swallowed.
+    """
     _log(f"$ (cd {cwd}) {cmd}")
     if dry:
         return
-    subprocess.run(cmd, cwd=str(cwd), shell=True, check=True)
+    p = subprocess.run(cmd, cwd=str(cwd), shell=True, capture_output=True, text=True)
+    out = (p.stdout or "") + (p.stderr or "")
+    if p.returncode != 0:
+        tail_txt = "\n".join(out.splitlines()[-tail:])
+        print(f"[experiments] command failed (exit {p.returncode}); last {tail} lines:\n"
+              f"{tail_txt}", flush=True)
+        raise subprocess.CalledProcessError(p.returncode, cmd, output=p.stdout, stderr=p.stderr)
+    lines = out.splitlines()
+    if lines:  # show progress tail on success too
+        print("\n".join(lines[-tail:]), flush=True)
 
 
 def _argv(cmd: Sequence[str], cwd: Path, dry: bool) -> None:
@@ -112,6 +126,18 @@ def prepare(method: Method, workdir_root: str | Path = "/content",
             _sh(f"git checkout {method.ref}", cwd=wd, dry=dry)
         submods = " ".join(TRAIN_SUBMODULES)
         _sh(f"git submodule update --init --recursive {submods}", cwd=wd, dry=dry)
+        # Force the rasterizer's nested submodules (third_party/glm) — the stock
+        # setup.py hard-includes third_party/glm/, so a missing glm/ is the most
+        # common cause of a failed `pip install ./submodules/diff-gaussian-rasterization`.
+        raster = wd / "submodules" / "diff-gaussian-rasterization"
+        if (raster / ".git").exists() or (raster / ".gitmodules").exists():
+            _sh("git submodule update --init --recursive", cwd=raster, dry=dry)
+            # Optional pin to a different rasterizer branch/commit (applied AFTER
+            # the submodule update, which would otherwise reset it to the recorded
+            # SHA). Use when the stock commit does not build on this toolchain.
+            if method.rasterizer_ref:
+                _log(f"rasterizer_ref: checkout {method.rasterizer_ref}")
+                _sh(f"git checkout {method.rasterizer_ref}", cwd=raster, dry=dry)
 
     marker = workdir_root / _RASTERIZER_MARKER
     last = marker.read_text().strip() if marker.exists() else None
