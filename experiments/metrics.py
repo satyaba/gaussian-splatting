@@ -128,14 +128,27 @@ def extract_one(model_dir: str | Path, *, iteration: int = -1,
 
 def extract_run(run_id: str, *, csv_path: Optional[str | Path] = None,
                 home_dir: Optional[str] = None, workdir_root: str = "/content",
-                skip_prepare: bool = False, dry: bool = False) -> Optional[dict]:
+                skip_prepare: bool = False, dry: bool = False,
+                tag: Optional[str] = None,
+                model_dir: Optional[str | Path] = None) -> Optional[dict]:
+    """Score a manifest run by id.
+
+    ``tag`` / ``model_dir`` mirror the run side (``run_by_id(..., tag=...)``): a
+    tagged run lives in ``<home>/output/<run_id>_<tag>``, so pass the same ``tag``
+    here to read the right directory::
+
+        extract_run("sgdense_photo20k_pos_30k", tag="bw0.2")
+    """
     from experiments.runs import RUNS, _model_dir  # local import: avoid cycle
 
     if run_id not in RUNS:
         raise KeyError(f"unknown run {run_id!r}; known: {sorted(RUNS)}")
     spec = RUNS[run_id]
+    if model_dir is None:
+        model_dir = _model_dir(spec, home_dir, tag=tag)
+    label = spec.run_id if not tag else f"{spec.run_id}_{tag}"
     return extract_one(
-        _model_dir(spec, home_dir), iteration=-1, run_id=spec.run_id,
+        model_dir, iteration=-1, run_id=label,
         name=spec.notes or spec.method, csv_path=csv_path,
         workdir_root=workdir_root, skip_prepare=skip_prepare, dry=dry,
     )
@@ -171,6 +184,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     g.add_argument("--all", action="store_true", help="every non-sanity run in the manifest")
     g.add_argument("--sanity", action="store_true", help="the short sanity runs only")
     g.add_argument("--model-dir", help="evaluate an arbitrary model dir")
+    p.add_argument("--tag", default=None,
+                   help="output-dir suffix for --run-id (matches run_by_id(tag=...))")
     p.add_argument("--iteration", type=int, default=-1)
     p.add_argument("--name", default=None)
     p.add_argument("--csv", default=_default_csv(),
@@ -191,7 +206,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     elif args.sanity:
         extract_sanity(**kw)
     elif args.run_id:
-        extract_run(args.run_id, **kw)
+        extract_run(args.run_id, tag=args.tag, **kw)
     else:
         extract_one(args.model_dir, iteration=args.iteration, name=args.name,
                     run_id=args.model_dir.rstrip("/\\").split(os.sep)[-1],

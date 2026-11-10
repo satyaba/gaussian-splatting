@@ -203,7 +203,15 @@ run_by_id("sgdense_photo20k_pos_30k", model_dir="/content/output/pos_bw02",
 ```
 
 Each tagged run writes to its own model dir, so `experiments.metrics` can score
-them independently (point it at the dir with `--model-dir`).
+them independently — pass the same `tag` (or point `--model-dir` at the dir):
+
+```python
+from experiments.metrics import extract_run
+extract_run("sgdense_photo20k_pos_30k", tag="bw0.2")     # reads output/<run_id>_bw0.2
+```
+```bash
+python -m experiments.metrics --run-id sgdense_photo20k_pos_30k --tag bw0.2
+```
 
 ## How it works
 
@@ -251,6 +259,7 @@ count** — the same quantities reported by `SGDense_3DGS_Experiment.ipynb`.
 
 ```bash
 python -m experiments.metrics --run-id sgdense_30k       # one run
+python -m experiments.metrics --run-id sgdense_photo20k_pos_30k --tag bw0.2   # a sweep point
 python -m experiments.metrics --sanity                 # the short sanity runs
 python -m experiments.metrics --all                    # every non-sanity run
 python -m experiments.metrics --model-dir <path> --name "adhoc" --iteration 30000
