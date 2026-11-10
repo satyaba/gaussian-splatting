@@ -324,11 +324,12 @@ def resolve_source(spec: RunSpec, home_dir: Optional[str] = None,
     return Path(home) / "Dataset" / spec.dataset
 
 
-def _model_dir(spec: RunSpec, home_dir: Optional[str]) -> Path:
+def _model_dir(spec: RunSpec, home_dir: Optional[str], tag: Optional[str] = None) -> Path:
     home = home_dir or os.environ.get("HOME_DIR")
     if not home:
         raise RuntimeError("set $HOME_DIR or pass home_dir")
-    return Path(home) / "output" / spec.run_id
+    name = spec.run_id if not tag else f"{spec.run_id}_{tag}"
+    return Path(home) / "output" / name
 
 
 def _extra_args(spec: RunSpec, source: Path) -> List[str]:
@@ -345,7 +346,8 @@ def _extra_args(spec: RunSpec, source: Path) -> List[str]:
 def run(spec: RunSpec, home_dir: Optional[str] = None, dataset_root: Optional[str] = None,
         workdir_root: str = "/content", force: bool = False,
         skip_prepare: bool = False, dry: bool = False,
-        extra: Union[str, Sequence[str], None] = None) -> Path:
+        extra: Union[str, Sequence[str], None] = None,
+        tag: Optional[str] = None, model_dir: Optional[str] = None) -> Path:
     """Launch one run.
 
     ``extra`` adds CLI tokens on top of the spec's own ``extra`` — e.g. to
@@ -357,11 +359,17 @@ def run(spec: RunSpec, home_dir: Optional[str] = None, dataset_root: Optional[st
     Accepts a single shell-quoted string or an iterable of tokens. Tokens are
     appended AFTER the spec's args, so argparse's last-wins gives them override
     precedence.
+
+    ``tag`` gives this call its own output directory
+    (``<home>/output/<run_id>_<tag>``) so a sweep can run the same spec many
+    times without clobbering results; ``model_dir`` overrides the path entirely.
     """
     source = resolve_source(spec, home_dir, dataset_root)
-    model_dir = _model_dir(spec, home_dir)
+    if model_dir is None:
+        model_dir = _model_dir(spec, home_dir, tag=tag)
+    effective_id = spec.run_id if not tag else f"{spec.run_id}_{tag}"
     overrides = _split_extra([extra] if isinstance(extra, str) else extra)
-    print(f"[runs] {spec.run_id}: method={spec.method} iters={spec.iterations} "
+    print(f"[runs] {effective_id}: method={spec.method} iters={spec.iterations} "
           f"source={source}")
     if spec.notes:
         print(f"[runs]   note: {spec.notes}")

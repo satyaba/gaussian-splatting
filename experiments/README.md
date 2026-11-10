@@ -189,6 +189,22 @@ run_by_id("sgdense_photo20k_pos_tex_30k", extra="--texture_scale_beta 0.3", dry=
 Works for any `train.py` flag (route weights, betas, `--densify_until_iter`, etc.),
 not just the ones already present in the spec.
 
+**Sweeps need distinct output dirs.** `tag` appends a suffix to the run id
+(`<home>/output/<run_id>_<tag>`), and `model_dir` overrides the path outright:
+
+```python
+for bw in (0.5, 0.3, 0.1):
+    run_by_id("sgdense_photo20k_pos_30k", tag=f"bw{bw}",
+              extra=f"--boundary_weight {bw}")
+
+# or drop the results wherever you like
+run_by_id("sgdense_photo20k_pos_30k", model_dir="/content/output/pos_bw02",
+          extra="--boundary_weight 0.2")
+```
+
+Each tagged run writes to its own model dir, so `experiments.metrics` can score
+them independently (point it at the dir with `--model-dir`).
+
 ## How it works
 
 ```
