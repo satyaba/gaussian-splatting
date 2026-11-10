@@ -54,6 +54,11 @@ Runs:
 | `sgdense_photo25k_tex_scale_10` | `sgdense` | 30000 | standard + texture size route (`texture_scale_beta=1.0`) |
 | `sgdense_photo25k_tex_grad_-025` | `sgdense` | 30000 | standard + texture gradient route (`texture_beta=-0.25`) |
 | `sgdense_photo25k_pos_tex_30k` | `sgdense` | 30000 | standard + both routes (combined candidate) |
+| `sgdense_photo20k_30k` | `sgdense` | 30000 | 20k window: photo-only trigger, no routes |
+| `sgdense_photo20k_pos_30k` | `sgdense` | 30000 | 20k window + position route (interior 0.5 / boundary 0.3 / other 1.0) |
+| `sgdense_photo20k_tex_scale_10` | `sgdense` | 30000 | 20k window + texture size route (`texture_scale_beta=1.0`) |
+| `sgdense_photo20k_tex_grad_-025` | `sgdense` | 30000 | 20k window + texture gradient route (`texture_beta=-0.25`) |
+| `sgdense_photo20k_pos_tex_30k` | `sgdense` | 30000 | 20k window + both routes (combined candidate) |
 | `vanilla_sanity` | `vanilla_3dgs` | 3000 | SANITY smoke test |
 | `sgdense_sanity` | `sgdense` | 3000 | SANITY: legacy SGDense config |
 | `sgdense_photograd_sanity` | `sgdense` | 3000 | SANITY: legacy Option A |
