@@ -86,7 +86,7 @@ RUNS: Dict[str, RunSpec] = {
             notes="LEGACY: Option A (photo-only trigger) at the original 15k window.",
         ),
         RunSpec(
-            run_id="sgdense_photograd_tex_scale_10",
+            run_id="sgdense_photograd_tex_scale_30k",
             method="sgdense",
             iterations=30_000,
             seg_num_classes=99,
@@ -96,7 +96,7 @@ RUNS: Dict[str, RunSpec] = {
             notes="Photo-only gradient trigger + texture-based per-class size thresholds (Beta=1.0).",
         ),
         RunSpec(
-            run_id="sgdense_photograd_tex_grad_-025",
+            run_id="sgdense_photograd_tex_grad_30k",
             method="sgdense",
             iterations=30_000,
             seg_num_classes=99,
@@ -106,7 +106,7 @@ RUNS: Dict[str, RunSpec] = {
             notes="Photo-only gradient trigger + texture-based per-class gradient thresholds (Beta=-0.25).",
         ),
         RunSpec(
-            run_id="sgdense_photograd_pos_conf001",
+            run_id="sgdense_photograd_pos_30k",
             method="sgdense",
             iterations=30_000,
             seg_num_classes=99,
@@ -142,7 +142,7 @@ RUNS: Dict[str, RunSpec] = {
             notes="Standard + position-based per-regime scaling thresholds.",
         ),
         RunSpec(
-            run_id="sgdense_photo25k_tex_scale_10",
+            run_id="sgdense_photo25k_tex_scale_30k",
             method="sgdense",
             iterations=30_000,
             seg_num_classes=99,
@@ -152,7 +152,7 @@ RUNS: Dict[str, RunSpec] = {
             notes="Standard + texture-based per-class size thresholds (Beta=1.0).",
         ),
         RunSpec(
-            run_id="sgdense_photo25k_tex_grad_-025",
+            run_id="sgdense_photo25k_tex_grad_30k",
             method="sgdense",
             iterations=30_000,
             seg_num_classes=99,
@@ -204,7 +204,7 @@ RUNS: Dict[str, RunSpec] = {
             notes="20k window + position route (interior 0.5 / boundary 0.3 / other 1.0).",
         ),
         RunSpec(
-            run_id="sgdense_photo20k_tex_scale_10",
+            run_id="sgdense_photo20k_tex_scale_30k",
             method="sgdense",
             iterations=30_000,
             seg_num_classes=99,
@@ -214,7 +214,7 @@ RUNS: Dict[str, RunSpec] = {
             notes="20k window + texture size route (Beta=1.0).",
         ),
         RunSpec(
-            run_id="sgdense_photo20k_tex_grad_-025",
+            run_id="sgdense_photo20k_tex_grad_30k",
             method="sgdense",
             iterations=30_000,
             seg_num_classes=99,
