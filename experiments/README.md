@@ -46,15 +46,25 @@ Runs:
 | `vanilla_30k` | `vanilla_3dgs` | 30000 | upstream graphdeco 3DGS (stock rasterizer), `--eval` |
 | `sgdense_30k` | `sgdense` | 30000 | LEGACY: floaters frozen, total-gradient trigger, 15k window |
 | `sgdense_photograd_30k` | `sgdense` | 30000 | LEGACY: Option A (photo-only trigger) at the 15k window |
+| `sgdense_photograd_tex_scale_10` | `sgdense` | 30000 | legacy window + texture size route (`texture_scale_beta=1.0`) |
+| `sgdense_photograd_tex_grad_-025` | `sgdense` | 30000 | legacy window + texture gradient route (`texture_beta=-0.25`) |
+| `sgdense_photograd_pos_conf001` | `sgdense` | 30000 | legacy window + position route (interior 0.5 / boundary 0.3 / other 1.0) |
 | `sgdense_photo25k_30k` | `sgdense` | 30000 | **standard**: photo-only trigger + 25k window, no routes |
-| `sgdense_photo25k_pos_30k` | `sgdense` | 30000 | standard + `--position_based_thresh` |
-| `sgdense_photo25k_tex_30k` | `sgdense` | 30000 | standard + `--texture_based_thresh --texture_based_scale` |
+| `sgdense_photo25k_pos_30k` | `sgdense` | 30000 | standard + position route (interior 0.5 / boundary 0.3 / other 1.0) |
+| `sgdense_photo25k_tex_scale_10` | `sgdense` | 30000 | standard + texture size route (`texture_scale_beta=1.0`) |
+| `sgdense_photo25k_tex_grad_-025` | `sgdense` | 30000 | standard + texture gradient route (`texture_beta=-0.25`) |
 | `sgdense_photo25k_pos_tex_30k` | `sgdense` | 30000 | standard + both routes (combined candidate) |
 | `vanilla_sanity` | `vanilla_3dgs` | 3000 | SANITY smoke test |
 | `sgdense_sanity` | `sgdense` | 3000 | SANITY: legacy SGDense config |
 | `sgdense_photograd_sanity` | `sgdense` | 3000 | SANITY: legacy Option A |
 | `sgdense_photo25k_sanity` | `sgdense` | 3000 | SANITY: standard config |
-| `sgdense_photo25k_routes_sanity` | `sgdense` | 3000 | SANITY: standard + position & texture routes |
+| `sgdense_photo25k_routes_sanity` | `sgdense` | 3000 | SANITY: standard + both routes with the tuned weights/betas |
+
+The texture/position routes are **hyperparameter modulations**, not new densification
+sources: `--position_based_thresh` scales the clone/split **size** threshold per
+regime (`--interior_weight` / `--boundary_weight` / `--other_weight`), while
+`--texture_based_thresh` / `--texture_based_scale` scale the per-class **gradient** /
+**size** thresholds via `--texture_beta` / `--texture_scale_beta`.
 
 The SGDense **standard** flips the defaults: the clone/split trigger follows the
 photometric(+depth) gradient only (`--densify_photo_grad_only`, now `True`) and the
