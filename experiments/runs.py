@@ -22,9 +22,9 @@ import argparse
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
-from experiments.runner import run_method
+from experiments.runner import run_method, _split_extra
 
 DEFAULT_DATASET = "office_0/Sequence_1"
 DEFAULT_ITERATIONS = 30_000
@@ -344,13 +344,29 @@ def _extra_args(spec: RunSpec, source: Path) -> List[str]:
 # --------------------------------------------------------------------------- #
 def run(spec: RunSpec, home_dir: Optional[str] = None, dataset_root: Optional[str] = None,
         workdir_root: str = "/content", force: bool = False,
-        skip_prepare: bool = False, dry: bool = False) -> Path:
+        skip_prepare: bool = False, dry: bool = False,
+        extra: Union[str, Sequence[str], None] = None) -> Path:
+    """Launch one run.
+
+    ``extra`` adds CLI tokens on top of the spec's own ``extra`` — e.g. to
+    override a hyperparameter per call from a notebook::
+
+        run_by_id("sgdense_photo20k_pos_30k",
+                  extra="--boundary_weight 0.2 --interior_weight 0.4")
+
+    Accepts a single shell-quoted string or an iterable of tokens. Tokens are
+    appended AFTER the spec's args, so argparse's last-wins gives them override
+    precedence.
+    """
     source = resolve_source(spec, home_dir, dataset_root)
     model_dir = _model_dir(spec, home_dir)
+    overrides = _split_extra([extra] if isinstance(extra, str) else extra)
     print(f"[runs] {spec.run_id}: method={spec.method} iters={spec.iterations} "
           f"source={source}")
     if spec.notes:
         print(f"[runs]   note: {spec.notes}")
+    if overrides:
+        print(f"[runs]   overrides: {' '.join(overrides)}")
     return run_method(
         spec.method,
         source=source,
@@ -358,7 +374,7 @@ def run(spec: RunSpec, home_dir: Optional[str] = None, dataset_root: Optional[st
         workdir_root=workdir_root,
         iterations=spec.iterations,
         images=spec.images,
-        extra=_extra_args(spec, source),
+        extra=_extra_args(spec, source) + overrides,
         force=force,
         skip_prepare=skip_prepare,
         dry=dry,

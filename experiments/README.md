@@ -168,6 +168,27 @@ for run_id in RUNS:            # or run_by_id("sgdense_30k")
     run_by_id(run_id)
 ```
 
+### Per-run hyperparameter overrides (notebook)
+
+`run_by_id` (and `run`) accept an `extra` argument — CLI tokens appended **after**
+the spec's own args, so argparse's last-wins lets them override any hyperparameter
+for a single call without editing the manifest:
+
+```python
+# single shell-quoted string ...
+run_by_id("sgdense_photo20k_pos_30k",
+          extra="--boundary_weight 0.2 --interior_weight 0.4")
+
+# ... or a token list
+run_by_id("sgdense_photo20k_tex_grad_-025", extra=["--texture_beta", "0.5"])
+
+# preview without executing
+run_by_id("sgdense_photo20k_pos_tex_30k", extra="--texture_scale_beta 0.3", dry=True)
+```
+
+Works for any `train.py` flag (route weights, betas, `--densify_until_iter`, etc.),
+not just the ones already present in the spec.
+
 ## How it works
 
 ```
