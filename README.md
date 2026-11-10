@@ -236,7 +236,7 @@ python train.py -s <path to COLMAP or NeRF Synthetic dataset>
   #### --densify_from_iter
   Iteration where densification starts, ```500``` by default. 
   #### --densify_until_iter
-  Iteration where densification stops, ```15_000``` by default.
+  Iteration where densification stops, ```25_000``` by default (SGDense extended window; upstream ```15_000```).
   #### --densify_grad_threshold
   Limit that decides if points should be densified based on 2D position gradient, ```0.0002``` by default.
   #### --densification_interval

@@ -8,7 +8,7 @@ Usage (Colab / Linux, from the SGDense-3DGS repo root)::
         --model-dir "$HOME_DIR/output/runB1" \
         --iterations 30000
 
-    python -m experiments.runner --method sgdense --run-id run38ext \
+    python -m experiments.runner --method sgdense --run-id sgdense_ext \
         --iterations 30000 \
         --extra "--segmentation_path $SEG_DIR --num_segmentation_classes 99 --floater_action freeze"
 

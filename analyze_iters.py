@@ -5,7 +5,7 @@ def load(p):
         return json.load(f)
 
 van = load(r"D:\Backup\Downloads\grad_stats_vanilla.json")
-sgd = load(r"D:\Backup\Downloads\grad_stats_run38.json")
+sgd = load(r"D:\Backup\Downloads\grad_stats_sgdense.json")
 
 def col(it, j):
     return [r[j] for r in it]

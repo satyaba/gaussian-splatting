@@ -94,7 +94,7 @@ class OptimizationParams(ParamGroup):
         self.densification_interval = 100
         self.opacity_reset_interval = 3000
         self.densify_from_iter = 500
-        self.densify_until_iter = 15_000
+        self.densify_until_iter = 25_000  # SGDense standard: extended densification window
         self.densify_grad_threshold = 0.0002
         self.depth_l1_weight_init = 1.0
         self.depth_l1_weight_final = 0.01
@@ -136,14 +136,15 @@ class SGDenseParams(ParamGroup):
         # raw per-iteration 2D-mean gradient norm to <model_path>/grad_stats.json.
         self.log_grad_stats = False
         # --- densification gradient source (Option A) ---
-        # Off (default) = upstream behaviour: the clone/split trigger accumulates the
-        # gradient of the *total* loss w.r.t. the screen-space means, so every loss
-        # term (including the segmentation cross-entropy) can inflate the trigger.
-        # On = the trigger accumulates the PHOTOMETRIC (+ depth) position gradient
-        # only, decoupling densification from the segmentation loss; the full loss
-        # still drives the optimiser. Costs an extra rasteriser backward pass during
-        # the densification window.
-        self.densify_photo_grad_only = False
+        # On (default) = the clone/split trigger accumulates the PHOTOMETRIC
+        # (+ depth) position gradient only, decoupling densification from the
+        # segmentation loss so the segmentation cross-entropy cannot inflate the
+        # trigger; the full loss still drives the optimiser. Costs an extra
+        # rasteriser backward pass during the densification window.
+        # Pass --no_densify_photo_grad_only to restore upstream behaviour (the
+        # gradient of the *total* loss w.r.t. the screen-space means drives the
+        # trigger, so every loss term including L_seg can inflate it).
+        self.densify_photo_grad_only = True
         # --- floater lifecycle ('prune' | 'freeze') ---
         self.floater_action = "prune"
         # --- POSITION_BASED_THRESH per-regime scaling-threshold weights ---

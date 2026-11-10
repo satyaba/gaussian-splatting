@@ -5,7 +5,7 @@ def load(p):
         return json.load(f)
 
 van = load(r"D:\Backup\Downloads\grad_stats_vanilla.json")
-sgd = load(r"D:\Backup\Downloads\grad_stats_run38.json")
+sgd = load(r"D:\Backup\Downloads\grad_stats_sgdense.json")
 
 def summarize(name, d):
     ev = d["events"]
@@ -30,7 +30,7 @@ def summarize(name, d):
     print("  iters[-1]:", it[-1])
 
 summarize("VANILLA 3DGS", van)
-summarize("SGDense (run38)", sgd)
+summarize("SGDense", sgd)
 
 # ---- comparison over common iteration axis ----
 print("=" * 70)

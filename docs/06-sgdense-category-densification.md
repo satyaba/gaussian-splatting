@@ -81,6 +81,12 @@ to `entropy > tau_entropy_high` (+ the opacity gate for floaters). Corrected in
   removes flagged floaters every densification event (run26; churn);
   `'freeze'` keeps them and de-candidates them for clone/split (no churn).
   Default `'prune'`.
+- Densification gradient source & window (not fields of the dict — they live in
+  `OptimizationParams` / `SGDenseParams`): the clone/split trigger now follows the
+  photometric(+depth) screen-space gradient only — `--densify_photo_grad_only`,
+  **default `True`** (`--no_densify_photo_grad_only` restores the total-loss
+  gradient), decoupling densification from `L_seg` — and the window runs to
+  `densify_until_iter` **25 000** (default; upstream was 15 000).
 
 Both texture routes read the same cached `s_tilde`; `train.py` computes it when
 either is enabled. `floater_action='freeze'` passes a `freeze_mask` through

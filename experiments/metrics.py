@@ -11,7 +11,7 @@ stock 3DGS rasterization; the seg channels are additive), so it can score both
 SGDense and upstream-graphdeco PLYs. It therefore ensures the ``sgdense``
 rasterizer is installed before evaluating.
 
-    python -m experiments.metrics --run-id run38_30k
+    python -m experiments.metrics --run-id sgdense_30k
     python -m experiments.metrics --all
     python -m experiments.metrics --model-dir <path> --name "my run" --iteration 30000
 """

@@ -6,7 +6,7 @@ args); :mod:`experiments.runner` says *how* to prepare and launch it. Add a
 ``run_all()`` from a notebook.
 
     python -m experiments.runs --list
-    python -m experiments.runs --run run38_30k
+    python -m experiments.runs --run sgdense_30k
     python -m experiments.runs --all
 
 Dataset layout assumed under ``$HOME_DIR/Dataset/<dataset>``::
@@ -48,7 +48,15 @@ class RunSpec:
 # RUNS                                                                         #
 # --------------------------------------------------------------------------- #
 # 30k runs (extending the 12k screening). Baseline = upstream graphdeco 3DGS;
-# best method = SGDense run38 (L1+L2 floaters with FLOATER_ACTION='freeze').
+# best method = SGDense (L1+L2 floaters with FLOATER_ACTION='freeze').
+#
+# SGDense standard (after the Option-A decision): the clone/split trigger follows
+# the PHOTOMETRIC (+depth) gradient only (--densify_photo_grad_only, now the
+# default) and the densification window runs to 25k (--densify_until_iter, now
+# the default). The legacy sgdense_30k / sgdense_photograd_30k specs below are
+# PINNED to their historical settings (total-gradient trigger, 15k window) so they
+# keep reproducing the reported baselines. The `sgdense_photo25k_*` grid turns on
+# the standard plus the existing texture/position densification routes.
 RUNS: Dict[str, RunSpec] = {
     r.run_id: r
     for r in (
@@ -58,25 +66,64 @@ RUNS: Dict[str, RunSpec] = {
             iterations=30_000,
             notes="Upstream graphdeco 3DGS (stock rasterizer), --eval split.",
         ),
+        # --- legacy SGDense baselines: pinned to pre-Option-A settings ---
         RunSpec(
-            run_id="run38_30k",
-            method="sgdense",
-            iterations=30_000,
-            seg_num_classes=99,
-            extra=("--floater_action", "freeze", "--log_densify_events", "--log_grad_stats"),
-            notes="Level-2 floaters, frozen (L1+L2 on, no texture/position routes).",
-        ),
-        # Option A: same as run38_30k but the clone/split trigger accumulates the
-        # photometric(+depth) screen-space gradient only, so the segmentation loss
-        # cannot inflate densification. Keep run38_30k as the total-gradient baseline.
-        RunSpec(
-            run_id="run38_photograd_30k",
+            run_id="sgdense_30k",
             method="sgdense",
             iterations=30_000,
             seg_num_classes=99,
             extra=("--floater_action", "freeze", "--log_densify_events", "--log_grad_stats",
-                   "--densify_photo_grad_only"),
-            notes="Option A: run38 + densification decoupled from the seg loss.",
+                   "--no_densify_photo_grad_only", "--densify_until_iter", "15000"),
+            notes="LEGACY: floaters frozen; total-gradient trigger, 15k window (pre-Option-A).",
+        ),
+        RunSpec(
+            run_id="sgdense_photograd_30k",
+            method="sgdense",
+            iterations=30_000,
+            seg_num_classes=99,
+            extra=("--floater_action", "freeze", "--log_densify_events", "--log_grad_stats",
+                   "--densify_photo_grad_only", "--densify_until_iter", "15000"),
+            notes="LEGACY: Option A (photo-only trigger) at the original 15k window.",
+        ),
+        # --- SGDense standard: photo-only trigger + 25k window; route grid. ---
+        RunSpec(
+            run_id="sgdense_photo25k_30k",
+            method="sgdense",
+            iterations=30_000,
+            seg_num_classes=99,
+            extra=("--floater_action", "freeze", "--log_densify_events", "--log_grad_stats",
+                   "--densify_photo_grad_only", "--densify_until_iter", "25000"),
+            notes="Standard: photo-only trigger + 25k window, no texture/position routes.",
+        ),
+        RunSpec(
+            run_id="sgdense_photo25k_pos_30k",
+            method="sgdense",
+            iterations=30_000,
+            seg_num_classes=99,
+            extra=("--floater_action", "freeze", "--log_densify_events", "--log_grad_stats",
+                   "--densify_photo_grad_only", "--densify_until_iter", "25000",
+                   "--position_based_thresh"),
+            notes="Standard + position-based per-regime scaling thresholds.",
+        ),
+        RunSpec(
+            run_id="sgdense_photo25k_tex_30k",
+            method="sgdense",
+            iterations=30_000,
+            seg_num_classes=99,
+            extra=("--floater_action", "freeze", "--log_densify_events", "--log_grad_stats",
+                   "--densify_photo_grad_only", "--densify_until_iter", "25000",
+                   "--texture_based_thresh", "--texture_based_scale"),
+            notes="Standard + texture-based per-class gradient & size thresholds.",
+        ),
+        RunSpec(
+            run_id="sgdense_photo25k_pos_tex_30k",
+            method="sgdense",
+            iterations=30_000,
+            seg_num_classes=99,
+            extra=("--floater_action", "freeze", "--log_densify_events", "--log_grad_stats",
+                   "--densify_photo_grad_only", "--densify_until_iter", "25000",
+                   "--position_based_thresh", "--texture_based_thresh", "--texture_based_scale"),
+            notes="Standard + both position and texture routes (combined candidate).",
         ),
         # --- sanity runs: same configs, 3_000 iters. Enough to cross the seg
         # warmup (2000), run densification + floater/freeze, hit the opacity
@@ -89,23 +136,45 @@ RUNS: Dict[str, RunSpec] = {
             notes="SANITY: upstream 3DGS @3k.",
         ),
         RunSpec(
-            run_id="run38_sanity",
-            method="sgdense",
-            iterations=3_000,
-            seg_num_classes=99,
-            extra=("--floater_action", "freeze", "--log_densify_events", "--log_grad_stats"),
-            sanity=True,
-            notes="SANITY: SGDense run38 @3k (exercises warmup+densify+freeze+reset).",
-        ),
-        RunSpec(
-            run_id="run38_photograd_sanity",
+            run_id="sgdense_sanity",
             method="sgdense",
             iterations=3_000,
             seg_num_classes=99,
             extra=("--floater_action", "freeze", "--log_densify_events", "--log_grad_stats",
-                   "--densify_photo_grad_only"),
+                   "--no_densify_photo_grad_only", "--densify_until_iter", "15000"),
             sanity=True,
-            notes="SANITY: Option A (photo-only densify) @3k.",
+            notes="SANITY: LEGACY SGDense config @3k (total-gradient trigger).",
+        ),
+        RunSpec(
+            run_id="sgdense_photograd_sanity",
+            method="sgdense",
+            iterations=3_000,
+            seg_num_classes=99,
+            extra=("--floater_action", "freeze", "--log_densify_events", "--log_grad_stats",
+                   "--densify_photo_grad_only", "--densify_until_iter", "15000"),
+            sanity=True,
+            notes="SANITY: LEGACY Option A (photo-only densify) @3k.",
+        ),
+        RunSpec(
+            run_id="sgdense_photo25k_sanity",
+            method="sgdense",
+            iterations=3_000,
+            seg_num_classes=99,
+            extra=("--floater_action", "freeze", "--log_densify_events", "--log_grad_stats",
+                   "--densify_photo_grad_only", "--densify_until_iter", "25000"),
+            sanity=True,
+            notes="SANITY: standard (photo-only + 25k) @3k.",
+        ),
+        RunSpec(
+            run_id="sgdense_photo25k_routes_sanity",
+            method="sgdense",
+            iterations=3_000,
+            seg_num_classes=99,
+            extra=("--floater_action", "freeze", "--log_densify_events", "--log_grad_stats",
+                   "--densify_photo_grad_only", "--densify_until_iter", "25000",
+                   "--position_based_thresh", "--texture_based_thresh", "--texture_based_scale"),
+            sanity=True,
+            notes="SANITY: standard + position & texture routes @3k (exercises route code paths).",
         ),
     )
 }

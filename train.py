@@ -574,6 +574,8 @@ if __name__ == "__main__":
     # store_true, which cannot turn a default-True flag off).
     parser.add_argument('--no_lvl1_floaters', action='store_false', dest='lvl1_floaters')
     parser.add_argument('--no_lvl2_floaters', action='store_false', dest='lvl2_floaters')
+    parser.add_argument('--no_densify_photo_grad_only', action='store_false',
+                        dest='densify_photo_grad_only')
     parser.add_argument('--no_tex_no_illum_norm', action='store_false', dest='tex_no_illum_norm')
     parser.add_argument('--ip', type=str, default="127.0.0.1")
     parser.add_argument('--port', type=int, default=6009)

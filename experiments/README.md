@@ -35,7 +35,7 @@ export SEG_DIR=$DATASET_DIR/semantic_class
 ```bash
 python -m experiments.runs --list           # show runs
 python -m experiments.runs --sanity         # short smoke runs (verify the pipeline)
-python -m experiments.runs --run run38_30k  # one run
+python -m experiments.runs --run sgdense_30k  # one run
 python -m experiments.runs --all            # every non-sanity run
 ```
 
@@ -44,9 +44,23 @@ Runs:
 | run id | method | iters | notes |
 |---|---|---|---|
 | `vanilla_30k` | `vanilla_3dgs` | 30000 | upstream graphdeco 3DGS (stock rasterizer), `--eval` |
-| `run38_30k` | `sgdense` | 30000 | L1+L2 floaters, `FLOATER_ACTION=freeze`, no texture/position routes |
+| `sgdense_30k` | `sgdense` | 30000 | LEGACY: floaters frozen, total-gradient trigger, 15k window |
+| `sgdense_photograd_30k` | `sgdense` | 30000 | LEGACY: Option A (photo-only trigger) at the 15k window |
+| `sgdense_photo25k_30k` | `sgdense` | 30000 | **standard**: photo-only trigger + 25k window, no routes |
+| `sgdense_photo25k_pos_30k` | `sgdense` | 30000 | standard + `--position_based_thresh` |
+| `sgdense_photo25k_tex_30k` | `sgdense` | 30000 | standard + `--texture_based_thresh --texture_based_scale` |
+| `sgdense_photo25k_pos_tex_30k` | `sgdense` | 30000 | standard + both routes (combined candidate) |
 | `vanilla_sanity` | `vanilla_3dgs` | 3000 | SANITY smoke test |
-| `run38_sanity` | `sgdense` | 3000 | SANITY smoke test |
+| `sgdense_sanity` | `sgdense` | 3000 | SANITY: legacy SGDense config |
+| `sgdense_photograd_sanity` | `sgdense` | 3000 | SANITY: legacy Option A |
+| `sgdense_photo25k_sanity` | `sgdense` | 3000 | SANITY: standard config |
+| `sgdense_photo25k_routes_sanity` | `sgdense` | 3000 | SANITY: standard + position & texture routes |
+
+The SGDense **standard** flips the defaults: the clone/split trigger follows the
+photometric(+depth) gradient only (`--densify_photo_grad_only`, now `True`) and the
+densification window runs to `--densify_until_iter 25000` (now the default). The
+legacy `sgdense_30k` / `sgdense_photograd_30k` specs pin their historical settings
+(total-gradient trigger, 15k window) so the reported baselines stay reproducible.
 
 The **sanity runs** reuse the exact full-run configs at 3 000 iterations — enough
 to cross the seg warmup (2000), run densification with floater/freeze handling,
@@ -70,8 +84,8 @@ segmentation, so per-Gaussian `parent_class` is `-1`.
 
 ### Densification event log (SGDense runs)
 
-SGDense runs configured with `--log_densify_events` (currently `run38_30k` and
-`run38_sanity`) attach a `sgdense.DensifyTracker` in `train.py` and write
+SGDense runs configured with `--log_densify_events` (currently `sgdense_30k` and
+`sgdense_sanity`) attach a `sgdense.DensifyTracker` in `train.py` and write
 `<model_dir>/densify_events.pt` — one record per densification event with the
 clone/split/prune selections, prune reasons, per-Gaussian stable ids + population,
 and a decimated per-event point snapshot. Load it with `sgdense.load_events(path)`
@@ -118,7 +132,7 @@ python -m experiments.runner --method vanilla_3dgs --run-id runB1 \
     --iterations 30000
 
 # SGDense-3DGS (same 30k)
-python -m experiments.runner --method sgdense --run-id run38ext \
+python -m experiments.runner --method sgdense --run-id sgdense_ext \
     --iterations 30000 \
     --extra "--segmentation_path $SEG_DIR --num_segmentation_classes 99 --floater_action freeze"
 ```
@@ -135,7 +149,7 @@ from experiments.runs import run_by_id, RUNS
 os.environ["HOME_DIR"] = "/content/drive/MyDrive/Magister/Thesis/Script"
 os.environ["DATASET_ROOT"] = os.environ["HOME_DIR"] + "/Dataset"
 
-for run_id in RUNS:            # or run_by_id("run38_30k")
+for run_id in RUNS:            # or run_by_id("sgdense_30k")
     run_by_id(run_id)
 ```
 
@@ -184,7 +198,7 @@ mean **PSNR / SSIM / LPIPS** per split (train & test) plus the final **Gaussian
 count** — the same quantities reported by `SGDense_3DGS_Experiment.ipynb`.
 
 ```bash
-python -m experiments.metrics --run-id run38_30k       # one run
+python -m experiments.metrics --run-id sgdense_30k       # one run
 python -m experiments.metrics --sanity                 # the short sanity runs
 python -m experiments.metrics --all                    # every non-sanity run
 python -m experiments.metrics --model-dir <path> --name "adhoc" --iteration 30000

@@ -1,7 +1,7 @@
 import json, math
 
 van = json.load(open(r"D:\Backup\Downloads\grad_stats_vanilla.json"))
-sgd = json.load(open(r"D:\Backup\Downloads\grad_stats_run38.json"))
+sgd = json.load(open(r"D:\Backup\Downloads\grad_stats_sgdense.json"))
 
 vd = {e["iter"]: e for e in van["events"]}
 sd = {e["iter"]: e for e in sgd["events"]}
@@ -62,7 +62,7 @@ parts.append(f'<text x="{(padL+W-padR)/2}" y="{yax+42}" text-anchor="middle">ite
 # legend
 lx = W - 240
 parts.append(f'<rect x="{lx}" y="12" width="14" height="14" fill="#1f77b4"/><text x="{lx+20}" y="24">Vanilla 3DGS</text>')
-parts.append(f'<rect x="{lx+120}" y="12" width="14" height="14" fill="#d62728"/><text x="{lx+140}" y="24">SGDense (run38)</text>')
+parts.append(f'<rect x="{lx+120}" y="12" width="14" height="14" fill="#d62728"/><text x="{lx+140}" y="24">SGDense</text>')
 parts.append('</svg>')
 
 open(r"D:\Projects\Personal\2026\SGDense-3DGS\grad_compare.svg", "w").write("\n".join(parts))

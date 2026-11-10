@@ -64,7 +64,7 @@ python -m experiments.profile --compare \
 ```
 
 The window should sit **after** the SGDense warmup (`seg_warmup_iters`, 2000)
-and **inside** the densification window (`densify_until_iter`, 15000), and
+and **inside** the densification window (`densify_until_iter`, default 25000), and
 should contain exactly one `% 100 == 0` boundary so both methods have one
 densify event. `3999:4099` satisfies all three (event at 4000).
 

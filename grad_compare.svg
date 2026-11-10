@@ -42,5 +42,5 @@
 <text x="889.1" y="650" text-anchor="middle" fill="#555">11100</text>
 <text x="525.0" y="672" text-anchor="middle">iteration</text>
 <rect x="760" y="12" width="14" height="14" fill="#1f77b4"/><text x="780" y="24">Vanilla 3DGS</text>
-<rect x="880" y="12" width="14" height="14" fill="#d62728"/><text x="900" y="24">SGDense (run38)</text>
+<rect x="880" y="12" width="14" height="14" fill="#d62728"/><text x="900" y="24">SGDense</text>
 </svg>
