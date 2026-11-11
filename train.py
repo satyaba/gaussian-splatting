@@ -267,7 +267,12 @@ def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations,
             # SGDense photo-weight ramp: the photo term is suppressed during the seg
             # warmup, then ramps back to full weight over ~10x the warmup length.
             photo_weight = 0.0
-            if iteration > opt.seg_warmup_iters:
+            if opt.seg_warmup_iters <= 0:
+                # Ramp disabled: keep full photometric weight from the start so
+                # the objective (and the densification trigger, which reads
+                # loss_no_seg below) is not damped. Also avoids // 0.
+                photo_weight = 1.0
+            elif iteration > opt.seg_warmup_iters:
                 new_ph_weight = (iteration // opt.seg_warmup_iters) / 10
                 photo_weight = new_ph_weight if new_ph_weight <= 1.0 else 1.0
             if tb_writer:
