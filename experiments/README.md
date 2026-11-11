@@ -189,6 +189,34 @@ run_by_id("sgdense_photo20k_pos_tex_30k", extra="--texture_scale_beta 0.3", dry=
 Works for any `train.py` flag (route weights, betas, `--densify_until_iter`, etc.),
 not just the ones already present in the spec.
 
+**Turning mechanisms off.** Route switches are `store_true`, so disabling one
+requires its `--no_*` negation (now registered for all of them):
+
+| mechanism | turn off with |
+|---|---|
+| floater detection (level 1 / 2) | `--no_lvl1_floaters --no_lvl2_floaters` |
+| position route | `--no_position_based_thresh` |
+| texture gradient route | `--no_texture_based_thresh` |
+| texture size route | `--no_texture_based_scale` |
+| photo-only densification trigger | `--no_densify_photo_grad_only` |
+| segmentation loss (`L_seg`) | `--lambda_seg 0` |
+
+Everything off, starting from any route spec:
+
+```python
+ALL_OFF = ("--no_lvl1_floaters --no_lvl2_floaters "
+           "--no_position_based_thresh "
+           "--no_texture_based_thresh --no_texture_based_scale "
+           "--no_densify_photo_grad_only")
+run_by_id("sgdense_photo20k_pos_tex_30k", tag="alloff", extra=ALL_OFF)
+# add "--lambda_seg 0" to also drop the segmentation loss term;
+# add "--densify_until_iter 15000" to also drop the extended window.
+```
+
+With every mechanism off, densification reduces to the plain 3DGS metrics-based
+trigger. For a *true* upstream baseline (stock rasterizer, no seg channels) use
+the `vanilla_30k` method instead.
+
 **Sweeps need distinct output dirs.** `tag` appends a suffix to the run id
 (`<home>/output/<run_id>_<tag>`), and `model_dir` overrides the path outright:
 

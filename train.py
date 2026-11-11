@@ -570,12 +570,20 @@ if __name__ == "__main__":
     op = OptimizationParams(parser)
     pp = PipelineParams(parser)
     sp = SGDenseParams(parser)
-    # Negations for the SGDense bools that default True (ParamGroup only emits
-    # store_true, which cannot turn a default-True flag off).
+    # Negations for the SGDense bool flags (ParamGroup only emits store_true, so
+    # without these a flag can never be turned off from the command line/extra).
+    # The lvl*/photo-grad flags default True; the route flags default False but
+    # still need a negation so `run_by_id(extra=...)` can switch them off.
     parser.add_argument('--no_lvl1_floaters', action='store_false', dest='lvl1_floaters')
     parser.add_argument('--no_lvl2_floaters', action='store_false', dest='lvl2_floaters')
     parser.add_argument('--no_densify_photo_grad_only', action='store_false',
                         dest='densify_photo_grad_only')
+    parser.add_argument('--no_position_based_thresh', action='store_false',
+                        dest='position_based_thresh')
+    parser.add_argument('--no_texture_based_thresh', action='store_false',
+                        dest='texture_based_thresh')
+    parser.add_argument('--no_texture_based_scale', action='store_false',
+                        dest='texture_based_scale')
     parser.add_argument('--no_tex_no_illum_norm', action='store_false', dest='tex_no_illum_norm')
     parser.add_argument('--ip', type=str, default="127.0.0.1")
     parser.add_argument('--port', type=int, default=6009)
