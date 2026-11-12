@@ -266,15 +266,13 @@ def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations,
 
             # SGDense photo-weight ramp: the photo term is suppressed during the seg
             # warmup, then ramps back to full weight over ~10x the warmup length.
-            photo_weight = 0.0
-            if opt.seg_warmup_iters <= 0:
-                # Ramp disabled: keep full photometric weight from the start so
-                # the objective (and the densification trigger, which reads
-                # loss_no_seg below) is not damped. Also avoids // 0.
-                photo_weight = 1.0
-            elif iteration > opt.seg_warmup_iters:
-                new_ph_weight = (iteration // opt.seg_warmup_iters) / 10
-                photo_weight = new_ph_weight if new_ph_weight <= 1.0 else 1.0
+            photo_weight = 1.0
+            if getattr(sgdense, "photo_weight_ramp", True) and opt.seg_warmup_iters > 0:
+                if iteration <= opt.seg_warmup_iters:
+                    photo_weight = 0.0
+                else:
+                    new_ph_weight = (iteration // opt.seg_warmup_iters) / 10
+                    photo_weight = new_ph_weight if new_ph_weight <= 1.0 else 1.0
             if tb_writer:
                 tb_writer.add_scalar("L_photo weight", photo_weight, iteration)
 
@@ -590,6 +588,7 @@ if __name__ == "__main__":
     parser.add_argument('--no_texture_based_scale', action='store_false',
                         dest='texture_based_scale')
     parser.add_argument('--no_tex_no_illum_norm', action='store_false', dest='tex_no_illum_norm')
+    parser.add_argument('--no_photo_weight_ramp', action='store_false', dest='photo_weight_ramp')
     parser.add_argument('--ip', type=str, default="127.0.0.1")
     parser.add_argument('--port', type=int, default=6009)
     parser.add_argument('--debug_from', type=int, default=-1)
