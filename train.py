@@ -443,10 +443,33 @@ def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations,
                             tb_writer.add_scalar("grad/acc_frac_over", grow["frac_over"] or 0.0, iteration)
                             tb_writer.add_scalar("grad/acc_thresh_pct", grow["thresh_pct"] or 0.0, iteration)
 
+                    # B: dynamic per-Gaussian trigger weight from segmentation
+                    # uncertainty (entropy or disagreement). w > 1 densifies MORE
+                    # where the histogram is uncertain; alpha's sign flips that.
+                    # z_ref = mean over observed rows keeps the global rate ~fixed.
+                    densify_weight = None
+                    if getattr(sgdense, "seg_uncertainty_thresh", False):
+                        if getattr(sgdense, "seg_uncertainty_stat", "entropy") == "disagree":
+                            z = disagree
+                        else:
+                            c = max(2, dataset.num_segmentation_classes)
+                            z = entropy / torch.log2(
+                                torch.tensor(float(c), device=entropy.device))
+                        observed = S > opt.seg_hist_min_evidence
+                        if bool(observed.any()):
+                            z_ref = z[observed].mean()
+                        else:
+                            z_ref = z.new_tensor(0.5)
+                        w = 1.0 + float(sgdense.seg_uncertainty_alpha) * (z - z_ref)
+                        w = w.clamp(min=float(sgdense.seg_uncertainty_wmin),
+                                    max=float(sgdense.seg_uncertainty_wmax))
+                        densify_weight = torch.where(observed, w, torch.ones_like(w))
+
                     gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent,
                                                 size_threshold, radii, cfg=cfg, s_tilde=s_tilde,
                                                 interior_mask=interior_mask_t, boundary_mask=boundary_mask_t,
-                                                floater_mask=floaters_mask_t, other_mask=other_mask_t)
+                                                floater_mask=floaters_mask_t, other_mask=other_mask_t,
+                                                densify_weight=densify_weight)
                     profiler.stop("densify")
 
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
@@ -589,6 +612,8 @@ if __name__ == "__main__":
                         dest='texture_based_scale')
     parser.add_argument('--no_tex_no_illum_norm', action='store_false', dest='tex_no_illum_norm')
     parser.add_argument('--no_photo_weight_ramp', action='store_false', dest='photo_weight_ramp')
+    parser.add_argument('--no_seg_uncertainty_thresh', action='store_false',
+                        dest='seg_uncertainty_thresh')
     parser.add_argument('--ip', type=str, default="127.0.0.1")
     parser.add_argument('--port', type=int, default=6009)
     parser.add_argument('--debug_from', type=int, default=-1)

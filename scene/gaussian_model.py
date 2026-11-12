@@ -666,7 +666,8 @@ class GaussianModel:
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, radii,
                           cfg=None, s_tilde=None,
-                          interior_mask=None, boundary_mask=None, floater_mask=None, other_mask=None):
+                          interior_mask=None, boundary_mask=None, floater_mask=None, other_mask=None,
+                          densify_weight=None):
         cfg = cfg if cfg is not None else _DEFAULT_CFG
         self.tmp_radii = radii                       # set BEFORE prune_points (it prunes tmp_radii)
 
@@ -685,11 +686,18 @@ class GaussianModel:
             interior_mask = interior_mask[keep] if interior_mask is not None else None
             boundary_mask = boundary_mask[keep] if boundary_mask is not None else None
             other_mask = other_mask[keep] if other_mask is not None else None
+            densify_weight = densify_weight[keep] if densify_weight is not None else None
         elif floater_mask is not None and cfg.floater_action == "freeze":
             freeze_mask = floater_mask
 
         grads = self.xyz_gradient_accum / self.denom   # recomputed: any prune above changed the length
         grads[grads.isnan()] = 0.0
+        # Dynamic per-Gaussian trigger weighting (seg_uncertainty / geom_support):
+        # w > 1 lowers the effective clone/split threshold for that Gaussian
+        # (grads must clear max_grad / w). z_ref-centred so the global rate is
+        # roughly preserved; it redistributes densification, not adds it.
+        if densify_weight is not None:
+            grads = grads * densify_weight.reshape(-1, 1).to(grads.device, grads.dtype)
 
         if cfg.position_based_thresh:
             regimes = {                                  # name -> (mask, scaling_threshold)

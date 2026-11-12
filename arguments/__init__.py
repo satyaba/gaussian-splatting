@@ -163,6 +163,20 @@ class SGDenseParams(ParamGroup):
         self.texture_beta = 0.5
         # --- TEXTURE_BASED_SCALE (clone/split size threshold) ---
         self.texture_scale_beta = 0.5
+        # --- SEG_UNCERTAINTY_THRESH (dynamic per-Gaussian trigger weighting, B) ---
+        # When on, the clone/split trigger gradient is multiplied per-Gaussian by
+        #   w = clamp(1 + alpha * (z - z_ref), w_min, w_max)
+        # where z is a DYNAMIC per-Gaussian uncertainty read from the persisted
+        # histogram (entropy normalized to [0,1], or disagree = 1 - top1) and z_ref
+        # is the mean over observed Gaussians (so the global rate is unchanged --
+        # this REDISTRIBUTES densification). alpha > 0 densifies MORE where seg is
+        # uncertain; alpha < 0 suppresses it. Rows with evidence S <=
+        # seg_hist_min_evidence keep a neutral weight of 1.
+        self.seg_uncertainty_thresh = False
+        self.seg_uncertainty_stat = "entropy"   # "entropy" | "disagree"
+        self.seg_uncertainty_alpha = 0.5
+        self.seg_uncertainty_wmin = 0.25
+        self.seg_uncertainty_wmax = 4.0
         # --- category thresholds (TAU_*) ---
         self.tau_p1 = 0.85
         self.tau_p2_high = 0.25
