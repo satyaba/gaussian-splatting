@@ -465,6 +465,27 @@ def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations,
                                     max=float(sgdense.seg_uncertainty_wmax))
                         densify_weight = torch.where(observed, w, torch.ones_like(w))
 
+                        # Debug (gated: only runs when seg_uncertainty_thresh is on):
+                        # one line per densification event, so we can see whether the
+                        # weight actually spreads (vs w ~= 1 everywhere) and whether
+                        # clamping is saturating.
+                        with torch.no_grad():
+                            zo = z[observed] if bool(observed.any()) else z
+                            q = torch.quantile(
+                                densify_weight,
+                                torch.tensor([0.1, 0.5, 0.9], device=densify_weight.device))
+                            lo = float(sgdense.seg_uncertainty_wmin)
+                            hi = float(sgdense.seg_uncertainty_wmax)
+                            print(f"[seg_uncertainty] it={iteration} "
+                                  f"stat={sgdense.seg_uncertainty_stat} alpha={float(sgdense.seg_uncertainty_alpha)} "
+                                  f"| z(obs) min/mean/max={float(zo.min()):.3f}/{float(zo.mean()):.3f}/{float(zo.max()):.3f} "
+                                  f"z_ref={float(z_ref):.3f} "
+                                  f"| w p10/50/90={float(q[0]):.3f}/{float(q[1]):.3f}/{float(q[2]):.3f} "
+                                  f"min/max={float(densify_weight.min()):.3f}/{float(densify_weight.max()):.3f} "
+                                  f"frac>1={float((densify_weight > 1.0).float().mean()):.3f} "
+                                  f"at_lo/hi={float((densify_weight <= lo + 1e-6).float().mean()):.3f}/"
+                                  f"{float((densify_weight >= hi - 1e-6).float().mean()):.3f}")
+
                     gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent,
                                                 size_threshold, radii, cfg=cfg, s_tilde=s_tilde,
                                                 interior_mask=interior_mask_t, boundary_mask=boundary_mask_t,
