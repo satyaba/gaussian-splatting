@@ -349,6 +349,14 @@ per-class learned placement policies.
 > **Permission-gated.** Do not run GPU-heavy steps without explicit user
 > approval; a training run needs a separate go.
 
+> **Status (2026-11-13).** Criteria 1–7 pass on CPU (local) and on Colab
+> (`torch 2.11.0+cu130`), together with both GPU tests for the
+> `densify_and_split` branch:
+> `PASS GPU placement positions (48 parents -> 96 children at +/-rho*s*n_hat)` and
+> `PASS GPU default (placement=None) is vanilla random and reproducible`.
+> Criteria 8–10 (matched-count ablation, floater rate) remain gated on a real
+> training run.
+
 **Local (CPU, no GPU) — must pass before any GPU run:**
 
 1. **Bit-for-bit default.** With `placement_mode='random'` (the default), the
