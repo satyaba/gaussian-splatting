@@ -191,6 +191,17 @@ class SGDenseParams(ParamGroup):
         self.knn_m = 32
         self.holdout_frac = 0.10
         self.thin_ratio_div = 3.0
+        # --- segmentation-boundary placement (docs/08) ---
+        # All inert by default: 'random' reproduces vanilla N(0, Sigma) split
+        # placement. 'boundary_normal' places split children along the local
+        # class-boundary normal derived from the persisted histogram.
+        self.placement_mode = "random"        # 'random' | 'boundary_normal'
+        self.placement_rho = 0.5
+        self.placement_knn_k = 12
+        self.placement_knn_kmin = 6
+        self.placement_use_tangent_fallback = True
+        self.placement_feasibility = True
+        self.placement_max_retries = 2
         # --- texture-frequency solver (TEXTURE_BASED_THRESH) ---
         self.tex_erode = 3
         self.tex_min_px = 500
