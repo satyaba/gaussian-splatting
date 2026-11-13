@@ -49,5 +49,16 @@ class DensificationConfig:
     holdout_frac: float = 0.10
     thin_ratio_div: float = 3.0   # thin at h / thin_ratio_div
 
+    # --- segmentation-boundary placement (docs/08) ---
+    # All inert by default: 'random' reproduces the current vanilla N(0, Sigma)
+    # split placement bit-for-bit (docs/08 section 0, D-P5).
+    placement_mode: str = "random"        # 'random' | 'boundary_normal'
+    placement_rho: float = 0.5            # offset ratio rho (children at +/- rho*sigma_major)
+    placement_knn_k: int = 12             # K neighbours per candidate parent
+    placement_knn_kmin: int = 6           # minimum neighbours for a valid n_hat
+    placement_use_tangent_fallback: bool = True   # invalid n_hat -> in-plane tangent (else random)
+    placement_feasibility: bool = True            # enable the reach/height gate
+    placement_max_retries: int = 2                # delta halvings before a child is dropped
+
     def to_dict(self):
         return asdict(self)
