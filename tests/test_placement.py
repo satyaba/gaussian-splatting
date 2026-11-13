@@ -51,14 +51,20 @@ def test_boundary_normal_recovers_separating_direction():
     # unit vectors (within numerical tolerance)
     assert torch.allclose(nh.norm(dim=1), torch.ones(nh.shape[0]), atol=1e-4), \
         "n_hat must be unit length"
-    # the boundary runs along x -> the discrimination direction is +/- x
-    assert (nh[:, 0].abs() > 0.98).float().mean() > 0.90, \
-        "n_hat does not align with the class-boundary direction (+/- x)"
     # projected onto the surface (z=0 plane): no off-surface component
     assert nh[:, 2].abs().max() < 1e-3, "n_hat leaks off the surface"
     ns = n_surf[valid]
     assert (nh * ns).sum(1).abs().max() < 1e-3, "n_hat is not tangent to the surface"
-    print("PASS local_frames boundary-normal direction + surface projection")
+    # the boundary runs along x -> the discrimination direction is +/- x.
+    # Restrict to points away from the slab's y-edges: there the neighbour set is
+    # one-sided, so n_hat legitimately picks up a y component (in a real scene
+    # those "edges" are scene boundaries). Away from them it is unambiguous.
+    near = xyz[valid][:, 1].abs() < 0.5
+    assert int(near.sum()) >= 50, f"too few interior-boundary points: {int(near.sum())}"
+    assert (nh[near][:, 0].abs() > 0.98).float().mean() > 0.98, \
+        "n_hat does not align with the class-boundary direction (+/- x)"
+    print(f"PASS local_frames boundary-normal direction + surface projection "
+          f"({int(near.sum())} interior-boundary pts)")
 
 
 def test_single_class_is_invalid():
