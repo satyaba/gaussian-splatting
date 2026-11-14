@@ -122,7 +122,7 @@ Confirmed layout (the COLMAP scene *is* `DATASET_DIR`, so `-s DATASET_DIR` works
 - `semantic_class/rgb_<N>.png` — GT **class** labels, native `480×640`, uint8
 - `semantic_instance/` **absent** in this copy → composite **degenerates to class-only**
 
-Sparse Replica class ids (`0 12 17 20 … 98`; 16 present per frame) are remapped to a contiguous range `1..K`; `void_ids` (default `{0}`, **to confirm**) collapse to `0`. `ReplicaLabelAdapter` resolves labels by filename **stem** (`rgb_0.png` ↔ `rgb_0.png`), so it is robust to extension differences. Implementation: `sgdc/datasets/replica.py`.
+Sparse Replica class ids (`0 12 17 20 … 98`; 16 present per frame) are remapped to a contiguous range `1..K`; **`void_ids` defaults to empty** (class `0` is a real class in this copy, so nothing is treated as void — and Component D's void-floater branch is simply inactive, leaving purity-based pruning). `ReplicaLabelAdapter` resolves labels by filename **stem** (`rgb_0.png` ↔ `rgb_0.png`), so it is robust to extension differences. Verified: **90 images ↔ 90 labels, 0 mismatches, both `640×480`**. Implementation: `sgdc/datasets/replica.py`.
 
 ### 2.2 Precompute — `src/sgdc/precompute.py`
 

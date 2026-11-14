@@ -43,7 +43,7 @@ class ReplicaLabelAdapter(LabelAdapter):
         self.instance_dir = Path(inst) if inst else (self.dataset_dir / "semantic_instance")
         if not self.instance_dir.exists():
             self.instance_dir = None
-        self.void_ids = {int(v) for v in self.cfg.get("void_ids", [0])}
+        self.void_ids = {int(v) for v in self.cfg.get("void_ids", [])}
 
         if not self.class_dir.exists():
             raise FileNotFoundError(f"Replica class labels not found: {self.class_dir}")
