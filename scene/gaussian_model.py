@@ -499,11 +499,23 @@ class GaussianModel:
 
     def compute_sgdc_thresholds(self, grad_threshold, scene_extent):
         """Per-Gaussian densification threshold tau_i and split gate theta_i (spec §4A)."""
-        tot = self.seg_tot_cnt.squeeze(-1).clamp_min(1.0)
-        d = (self.seg_dt_sum.squeeze(-1) / tot) / max(self.sgdc_dt_norm, 1e-6)
+        cnt = self.seg_tot_cnt.squeeze(-1)
+        d = (self.seg_dt_sum.squeeze(-1) / cnt.clamp_min(1.0)) / max(self.sgdc_dt_norm, 1e-6)
         d = d.clamp(0.0, 1.0)
+        unseen = cnt <= 0
+        d = torch.where(unseen, torch.ones_like(d), d)  # unseen -> conservative (interior)
+
         tau = grad_threshold * (self.sgdc_f_b * (1.0 - d) + self.sgdc_f_int * d)
         theta = self.percent_dense * scene_extent * (1.0 - self.sgdc_eta * (1.0 - d))
+
+        if getattr(self, "_sgdc_dbg", 0) < 6:
+            self._sgdc_dbg = getattr(self, "_sgdc_dbg", 0) + 1
+            print(f"[SGDC-diag] d(min/mean/max)="
+                  f"{d.min().item():.3f}/{d.mean().item():.3f}/{d.max().item():.3f} | "
+                  f"unseen={unseen.float().mean().item():.3f} "
+                  f"near(d<0.1)={(d < 0.1).float().mean().item():.3f} "
+                  f"far(d>0.9)={(d > 0.9).float().mean().item():.3f} | "
+                  f"tau[{tau.min().item():.2e},{tau.max().item():.2e}] theta_mean={theta.mean().item():.2e}")
         return tau, theta
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, radii):
