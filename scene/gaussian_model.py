@@ -455,9 +455,11 @@ class GaussianModel:
         padded_grad[:grads.shape[0]] = grads.reshape(-1)
         padded_tau = torch.zeros((n_init_points), device="cuda")
         padded_tau[:tau.shape[0]] = tau
+        padded_theta = torch.zeros((n_init_points), device="cuda")
+        padded_theta[:theta.shape[0]] = theta
         selected_pts_mask = torch.where(padded_grad >= padded_tau, True, False)
         selected_pts_mask = torch.logical_and(selected_pts_mask,
-                                              torch.max(self.get_scaling, dim=1).values > theta)
+                                              torch.max(self.get_scaling, dim=1).values > padded_theta)
 
         stds = self.get_scaling[selected_pts_mask].repeat(N,1)
         means =torch.zeros((stds.size(0), 3),device="cuda")
