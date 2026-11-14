@@ -510,8 +510,13 @@ class GaussianModel:
 
         if getattr(self, "_sgdc_dbg", 0) < 6:
             self._sgdc_dbg = getattr(self, "_sgdc_dbg", 0) + 1
-            print(f"[SGDC-diag] d(min/mean/max)="
-                  f"{d.min().item():.3f}/{d.mean().item():.3f}/{d.max().item():.3f} | "
+            raw = self.seg_dt_sum.squeeze(-1) / cnt.clamp_min(1.0)
+            rawv = raw[cnt > 0]
+            p50 = rawv.median().item() if rawv.numel() else -1.0
+            p90 = torch.quantile(rawv, 0.9).item() if rawv.numel() else -1.0
+            print(f"[SGDC-diag] dt_raw px(mean/p50/p90)="
+                  f"{rawv.mean().item():.1f}/{p50:.1f}/{p90:.1f} | "
+                  f"d(min/mean/max)={d.min().item():.3f}/{d.mean().item():.3f}/{d.max().item():.3f} | "
                   f"unseen={unseen.float().mean().item():.3f} "
                   f"near(d<0.1)={(d < 0.1).float().mean().item():.3f} "
                   f"far(d>0.9)={(d > 0.9).float().mean().item():.3f} | "
