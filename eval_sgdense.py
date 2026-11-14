@@ -125,10 +125,11 @@ def evaluate(gaussians, scene, dataset, pipe, decoder, cams, name, lp, ssim_fn, 
                     r_np, g_np = _to_img(r[0]), _to_img(g[0])
                     psnr_b = region_psnr(r_np, g_np, band)
                     psnr_i = region_psnr(r_np, g_np, ~band)
-                    mt = torch.from_numpy(band).to("cuda")[None, None]   # [1,1,H,W]
+                    mt = torch.from_numpy(band).to("cuda")[None, None]   # [1,1,H,W] bool
+                    inv = ~mt
                     # zero the complement in BOTH images so LPIPS sees only the band
                     lpips_b = lp((r * mt) * 2 - 1, (g * mt) * 2 - 1).item()
-                    lpips_i = lp((r * (1 - mt)) * 2 - 1, (g * (1 - mt)) * 2 - 1).item()
+                    lpips_i = lp((r * inv) * 2 - 1, (g * inv) * 2 - 1).item()
                     psnrs_b.append(psnr_b); lpipss_b.append(lpips_b)
                     psnrs_i.append(psnr_i); lpipss_i.append(lpips_i)
 
