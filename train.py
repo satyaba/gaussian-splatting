@@ -23,8 +23,8 @@ from scene.segmentation_decoder import SegmentationDecoder, save_decoder_checkpo
 from utils.general_utils import safe_state, get_expon_lr_func
 from sgdense.config import DensificationConfig
 from sgdense.categories import generate_category_masks
-from sgdense.placement import (local_frames, support_baseline, feasibility_scales,
-                               PlacementFrame)
+from sgdense.placement import (local_frames, tangent_frames, support_baseline,
+                               feasibility_scales, PlacementFrame)
 from sgdense.profiler import IterProfiler
 import uuid
 from tqdm import tqdm
@@ -88,6 +88,8 @@ def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations,
         placement_use_tangent_fallback=sgdense.placement_use_tangent_fallback,
         placement_feasibility=sgdense.placement_feasibility,
         placement_max_retries=sgdense.placement_max_retries,
+        placement_directional_clone=sgdense.placement_directional_clone,
+        placement_clone_children=sgdense.placement_clone_children,
     )
 
     # Per-class texture score for TEXTURE_BASED_THRESH / TEXTURE_BASED_SCALE: load
@@ -540,11 +542,37 @@ def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations,
                             tb_writer.add_scalar("placement/scale_mean",
                                                  float(scale.mean()), iteration)
 
+                    # --- stage 2: directional clone frame (docs/08 section 5) ----
+                    # clone is the interior action, so the direction is n_hat where
+                    # a class boundary exists, else the (cheap, histogram-free)
+                    # in-plane surface tangent.
+                    clone_placement = None
+                    if cfg.placement_directional_clone:
+                        P0 = int(gauss_xyz.shape[0])
+                        obs = gaussians.seg_hist.sum(dim=1) > opt.seg_hist_min_evidence
+                        tan_all, tan_ok = tangent_frames(
+                            gauss_xyz, obs, K=cfg.placement_knn_k,
+                            Kmin=cfg.placement_knn_kmin, k_m=cfg.knn_m,
+                            grid_target=cfg.grid_target)
+                        if placement is not None:
+                            cdirs = torch.where(placement.valid[:, None],
+                                                placement.n_hat, tan_all)
+                            cplaced = placement.valid | tan_ok
+                        else:
+                            cdirs, cplaced = tan_all, tan_ok
+                        clone_placement = PlacementFrame(
+                            n_hat=cdirs, valid=cplaced,
+                            scale=torch.ones(P0, device='cuda'))
+                        if tb_writer:
+                            tb_writer.add_scalar("placement/clone_placed_frac",
+                                                 float(cplaced.float().mean()), iteration)
+
                     gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent,
                                                 size_threshold, radii, cfg=cfg, s_tilde=s_tilde,
                                                 interior_mask=interior_mask_t, boundary_mask=boundary_mask_t,
                                                 floater_mask=floaters_mask_t, other_mask=other_mask_t,
-                                                densify_weight=densify_weight, placement=placement)
+                                                densify_weight=densify_weight, placement=placement,
+                                                clone_placement=clone_placement)
                     profiler.stop("densify")
 
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
@@ -693,6 +721,8 @@ if __name__ == "__main__":
                         dest='placement_use_tangent_fallback')
     parser.add_argument('--no_placement_feasibility', action='store_false',
                         dest='placement_feasibility')
+    parser.add_argument('--no_placement_directional_clone', action='store_false',
+                        dest='placement_directional_clone')
     parser.add_argument('--ip', type=str, default="127.0.0.1")
     parser.add_argument('--port', type=int, default=6009)
     parser.add_argument('--debug_from', type=int, default=-1)

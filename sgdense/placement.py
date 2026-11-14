@@ -16,6 +16,8 @@ The starting design (docs/08 section 4.1) is:
 Three functions:
 
 * :func:`local_frames`     -- per-parent ``n_hat`` + surface frame.
+* :func:`tangent_frames`   -- per-row in-plane surface tangent (clone placement;
+                              no histogram gather, so it is cheap to run broadly).
 * :func:`support_baseline` -- the hold-out p99 reach/height baseline that the
                               feasibility gate reuses (docs/08 section 6.5).
 * :func:`feasibility_scales` -- per-parent retraction factor for the ``+/-``
@@ -187,6 +189,41 @@ def local_frames(xyz, seg_hist, sel_mask, *, K=12, Kmin=6, k_m=32, h=None,
     n_surf[sel_idx] = n_s
     tangent[sel_idx] = tan_s
     return n_hat, valid, n_surf, tangent
+
+
+@torch.no_grad()
+def tangent_frames(xyz, sel_mask, *, K=12, Kmin=6, k_m=32, h=None, grid_target=8):
+    """Per-row in-plane surface tangent (clone placement, docs/08 section 5).
+
+    Unlike :func:`local_frames` this needs **no** segmentation histogram -- it
+    only fits the local surface via neighbour PCA -- so it is cheap to run over a
+    broad set of candidate parents. For an interior clone there is no class
+    boundary, so the placement direction is necessarily geometric: the
+    max-spread in-plane direction keeps the children on the surface.
+
+    Returns ``(tangent [P,3], ok [P] bool)``; ``tangent`` is 0 where not computed
+    or degenerate, ``ok`` is True where a usable unit tangent exists.
+    """
+    dev = xyz.device
+    P = int(xyz.shape[0])
+    tangent = torch.zeros(P, 3, device=dev)
+    ok = torch.zeros(P, dtype=torch.bool, device=dev)
+
+    sel_idx = sel_mask.bool().nonzero(as_tuple=True)[0]
+    if sel_idx.numel() == 0 or P < Kmin:
+        return tangent, ok
+
+    h = float(pick_cell_size(xyz, target=grid_target)) if h is None else float(h)
+    g = build_grid(xyz, h)
+    q = xyz[sel_idx].contiguous()
+    d, j = grid_knn(g, q, K=K, M=k_m)                             # [S,K], [S,K]
+    m = j >= 0
+    nbr = xyz[j.clamp(min=0)]                                     # [S,K,3]
+    _, _, tan = _surface_frame(nbr, m, dev)                       # max-spread direction
+    tan_ok = (m.sum(dim=1) >= Kmin) & (tan.norm(dim=1) > 0)
+    tangent[sel_idx] = tan
+    ok[sel_idx] = tan_ok
+    return tangent, ok
 
 
 @torch.no_grad()

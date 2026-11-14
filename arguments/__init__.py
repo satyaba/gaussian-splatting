@@ -202,6 +202,12 @@ class SGDenseParams(ParamGroup):
         self.placement_use_tangent_fallback = True
         self.placement_feasibility = True
         self.placement_max_retries = 2
+        # --- stage 2: directional clone (docs/08 section 5) ---
+        # When on, clone appends placement_clone_children placed children instead
+        # of a single coincident duplicate; direction = n_hat (boundary) else the
+        # in-plane surface tangent. Default off.
+        self.placement_directional_clone = False
+        self.placement_clone_children = 2
         # --- texture-frequency solver (TEXTURE_BASED_THRESH) ---
         self.tex_erode = 3
         self.tex_min_px = 500

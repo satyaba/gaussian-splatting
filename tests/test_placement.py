@@ -101,6 +101,58 @@ def test_determinism():
     print("PASS local_frames determinism")
 
 
+def test_tangent_frames_in_plane():
+    xyz, _ = make_slab()
+    sel = (xyz[:, 0].abs() > 0.2) & (xyz[:, 1].abs() < 0.5)     # interior, off the edges
+    tan, ok = PL.tangent_frames(xyz, sel, K=12, Kmin=6)
+    assert int(ok.sum()) >= 50, f"too few tangents: {int(ok.sum())}"
+    assert torch.allclose(tan[~ok], torch.zeros_like(tan[~ok])), "non-ok rows must be 0"
+    t = tan[ok]
+    assert torch.allclose(t.norm(dim=1), torch.ones(t.shape[0]), atol=1e-4), \
+        "tangent must be unit length"
+    assert t[:, 2].abs().max() < 1e-2, "tangent must lie in the surface plane"
+    print(f"PASS tangent_frames in-plane ({int(ok.sum())} pts)")
+
+
+def test_diagnostic_counts_placement():
+    import sys
+    sys.path.insert(0, ROOT)
+    from scripts.inspect_split_placement import split_placement_stats
+    from sgdense.densify_tracker import TrackerLog
+
+    torch.manual_seed(0)
+
+    def entry(parent, N, kind):
+        K = parent.shape[0]
+        if kind == "placed":
+            d = (torch.rand(K, 3) - 0.5)
+            kids = torch.cat([parent - d, parent + d], 0)
+        elif kind == "verbatim":
+            kids = parent.clone()
+        else:                                                   # random
+            kids = torch.cat([parent + 0.01 * torch.randn(K, 3),
+                              parent + 0.01 * torch.randn(K, 3)], 0)
+        return dict(regime="x", N=N, parent_gid=torch.arange(K), parent_xyz=parent,
+                    parent_grad=torch.zeros(K), parent_max_scale=torch.zeros(K),
+                    parent_opacity=torch.zeros(K), parent_class=torch.zeros(K, dtype=torch.long),
+                    child_gid=torch.arange(K * N), child_xyz=kids, child_scale=torch.zeros(K * N))
+
+    ev = dict(iter=1,
+              clone=[entry(torch.rand(5, 3), 1, "verbatim"),
+                     entry(torch.rand(3, 3), 2, "placed")],
+              split=[entry(torch.rand(4, 3), 2, "placed"),
+                     entry(torch.rand(3, 3), 2, "random")],
+              prune=[], resets=[])
+    st = split_placement_stats(TrackerLog(events=[ev], summary=[], next_id=0))
+
+    assert st["split_parents_total"] == 7 and st["placed"] == 4, st
+    assert abs(st["placed_frac"] - 4 / 7) < 1e-9
+    assert st["clone_parents_total"] == 8
+    assert abs(st["clone_directional_frac"] - 3 / 8) < 1e-9, st["clone_directional_frac"]
+    assert abs(st["clone_multi_frac"] - 3 / 8) < 1e-9, st["clone_multi_frac"]
+    print("PASS diagnostic classifies split + clone placement")
+
+
 # --------------------------------------------------------------------------- #
 # support_baseline                                                             #
 # --------------------------------------------------------------------------- #
@@ -212,13 +264,17 @@ def test_placement_sources_wired():
     arg = open(os.path.join(ROOT, "arguments", "__init__.py")).read()
     assert "local_frames" in tr and "feasibility_scales" in tr and "PlacementFrame" in tr, \
         "train.py does not build the placement frame"
-    assert "placement=placement" in tr, "train.py does not pass placement to densify_and_prune"
+    assert "placement=placement" in tr and "clone_placement=clone_placement" in tr, \
+        "train.py does not pass placement to densify_and_prune"
+    assert "tangent_frames" in tr, "train.py does not build the clone tangent frame"
     assert "boundary_normal" in tr, "train.py missing placement_mode gate"
-    assert "_place_split_children" in gm and "_pad_placement" in gm, \
+    assert "_place_children" in gm and "_pad_placement" in gm, \
         "gaussian_model missing placement helpers"
+    assert "placement_directional_clone" in gm, "gaussian_model missing directional clone"
     assert "placement" in gm.split("def densify_and_split")[1][:200], \
         "densify_and_split does not accept placement"
-    assert "placement_mode" in arg, "arguments missing placement_mode"
+    assert "placement_mode" in arg and "placement_directional_clone" in arg, \
+        "arguments missing placement fields"
     print("PASS placement sources wired (train.py / gaussian_model.py / arguments)")
 
 
@@ -306,6 +362,38 @@ def test_gpu_default_is_vanilla_random():
     print("PASS GPU default (placement=None) is vanilla random and reproducible")
 
 
+@_needs_cuda
+def test_gpu_directional_clone_positions():
+    from sgdense.config import DensificationConfig
+
+    g = _build_model(seed=0)
+    n = int(g.get_xyz.shape[0])
+    rho, N = 0.5, 2
+    dirs = torch.zeros(n, 3, device="cuda")
+    dirs[:, 0] = 1.0
+    frame = PL.PlacementFrame(n_hat=dirs,
+                              valid=torch.ones(n, dtype=torch.bool, device="cuda"),
+                              scale=torch.ones(n, device="cuda"))
+    cfg = DensificationConfig(placement_directional_clone=True,
+                              placement_clone_children=N, placement_rho=rho)
+
+    g.percent_dense = 10.0                       # so clone's size gate selects everyone
+    base = g.get_xyz.detach().clone()
+    maj = g.get_scaling.max(dim=1).values.detach().clone()
+    g.tmp_radii = torch.zeros(n, device="cuda")
+
+    g.densify_and_clone(torch.ones((n, 1), device="cuda"), 0.0, 1.0, cfg=cfg, placement=frame)
+    out = g.get_xyz.detach()
+    assert out.shape[0] == n + N * n, f"expected parents kept + {N*n} children, got {out.shape[0]}"
+
+    kids = out[n:]                               # appended in tiled order c*n + k
+    exp0 = base - rho * maj[:, None] * dirs      # frac -1
+    exp1 = base + rho * maj[:, None] * dirs      # frac +1
+    assert torch.allclose(kids[:n], exp0, atol=1e-4), "first tile != x - rho*s*n_hat"
+    assert torch.allclose(kids[n:], exp1, atol=1e-4), "second tile != x + rho*s*n_hat"
+    print(f"PASS GPU directional clone ({n} parents -> {N*n} placed children, parents kept)")
+
+
 if __name__ == "__main__":
     print("torch", torch.__version__)
     test_placement_sources_wired()
@@ -313,6 +401,8 @@ if __name__ == "__main__":
     test_single_class_is_invalid()
     test_unobserved_is_invalid()
     test_determinism()
+    test_tangent_frames_in_plane()
+    test_diagnostic_counts_placement()
     test_support_baseline_matches_formula()
     test_support_baseline_empty()
     test_feasibility_scales_keeps_on_surface()
@@ -324,4 +414,5 @@ if __name__ == "__main__":
     else:
         _run(test_gpu_placement_child_positions)
         _run(test_gpu_default_is_vanilla_random)
+        _run(test_gpu_directional_clone_positions)
     print("ALL PLACEMENT TESTS PASSED")

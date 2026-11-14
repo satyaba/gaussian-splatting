@@ -59,6 +59,12 @@ class DensificationConfig:
     placement_use_tangent_fallback: bool = True   # invalid n_hat -> in-plane tangent (else random)
     placement_feasibility: bool = True            # enable the reach/height gate
     placement_max_retries: int = 2                # delta halvings before a child is dropped
+    # --- stage 2: directional clone (docs/08 section 5) ---
+    # When on, clone appends placement_clone_children placed children
+    # (x +/- rho*scale*sigma_major*dir) instead of a single coincident duplicate.
+    # dir = n_hat (boundary) else the in-plane surface tangent. Default off.
+    placement_directional_clone: bool = False
+    placement_clone_children: int = 2
 
     def to_dict(self):
         return asdict(self)

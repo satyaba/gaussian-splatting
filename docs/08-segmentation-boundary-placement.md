@@ -190,6 +190,11 @@ Mirrors the style of `sgdense/densify_grad.py` and `sgdense/geometric.py`
      parent has no second class, or the projection degenerates; the caller then
      falls back (`tangent` → random `N(0,Σ)`). (Least-squares local LDA is the
      documented robust variant of step 4, §6.1.)
+- **[done]** `tangent_frames(xyz, sel_mask, *, K, Kmin, k_m, h=None,
+  grid_target=8)` → `(tangent [P,3], ok [P])`. Histogram-free neighbour-PCA: the
+  max-spread **in-plane** direction per row (same `_surface_frame` as
+  `local_frames`, no `[K,C]` gather), so it is cheap to run over a broad set.
+  Used for stage-2 clone placement (an interior clone has no class boundary).
 - **[done]** `support_baseline(ref_xyz, *, K, Kmin, k_m, holdout_frac,
   thin_ratio_div, grid_target, seed=0)` → `(h, thresh_reach, thresh_height)`.
   Replicates the hold-out p99 baseline of `categories.py:83–98` (§6.5); returns
@@ -210,7 +215,7 @@ Mirrors the style of `sgdense/densify_grad.py` and `sgdense/geometric.py`
   `scale` [P]) or `None`. The model duck-types the frame (no import), so it
   stays revertible on its own. When `None`, the vanilla random `N(0, Σ)` block is
   retained unchanged (behaviourally identical to today). When supplied, the
-  deterministic block is `_place_split_children(...)`:
+  deterministic block is `_place_children(...)` (shared with directional clone):
   ```
   dirs = placement.n_hat[sel]                           # unit, [K,3]
   scale = placement.scale[sel]                          # [K] retraction factor
@@ -226,19 +231,24 @@ Mirrors the style of `sgdense/densify_grad.py` and `sgdense/geometric.py`
   `n_hat`/`valid`/`scale` by the caller (`train.py`), so the model only applies
   the frame. **[done]** `_pad_placement` pads the frame (length `P_old`) with
   `valid=False`, `scale=1` rows to the post-clone population.
-- **[done]** `densify_and_prune` gains `placement=None` and forwards it to the
-  non-routed split. In the `floater_action='prune'` path the frame is
-  subset by `~floater_mask` alongside the other masks. If
-  `cfg.position_based_thresh` is set with a frame, both functions raise
-  `NotImplementedError` (§6.6) rather than mis-align the per-regime splits.
+- **[done]** `densify_and_clone` gains `placement=None` for **stage-2 directional
+  clone** (§5, `placement_directional_clone`): when a frame is supplied it appends
+  `placement_clone_children` placed children via `_place_children` (parent **kept**,
+  so the clone branch goes `+1 → +N`), else it keeps the single coincident
+  duplicate. **[done]** `densify_and_prune` gains `placement=None` (split) and
+  `clone_placement=None` (clone) and forwards both to the non-routed ops. In the
+  `floater_action='prune'` path both frames are subset by `~floater_mask` alongside
+  the other masks. If `cfg.position_based_thresh` is set with either frame, the
+  functions raise `NotImplementedError` (§6.6) rather than mis-align the per-regime
+  ops.
 - **[reuse]** child scale `/(0.8·N)` (`:606`), rotation/feature/`seg_hist`
   inheritance (`:607–613`), `densification_postfix` (`:615`), tracker hook
   (`:620`), `prune_filter` tail (`:623–627`) — **unchanged**.
 - **[flag · stage 2]** mode-splitting (§5) and anisotropic orientation (§5) —
-  not in the starting design.
-- **[unchanged]** `densify_and_clone` (`:629`), `_gauss_thresh` /
-  `_gauss_scale_thresh` (`:557`/`:567`), the `densify_weight` multiplier
-  (`:699–700`), and the `position_based_thresh` routing loop (`:702–733`).
+  not yet implemented.
+- **[unchanged]** `_gauss_thresh` / `_gauss_scale_thresh` (`:557`/`:567`), the
+  `densify_weight` multiplier (`:699–700`), and the `position_based_thresh`
+  routing loop (`:702–733`).
 
 ### 4.3 `train.py` (densification block)
 
@@ -272,6 +282,8 @@ Mirrors the style of `sgdense/densify_grad.py` and `sgdense/geometric.py`
 | `placement_use_tangent_fallback` | `True` | For invalid `n̂`, use the in-plane `tangent` direction (Option A) instead of random `N(0,Σ)`. |
 | `placement_feasibility` | `True` | Enable the §4.1 feasibility gate. |
 | `placement_max_retries` | `2` | δ halvings before a parent falls back to random. |
+| `placement_directional_clone` | `False` | Stage-2 (doc §5): clone appends `placement_clone_children` placed children instead of one coincident duplicate. |
+| `placement_clone_children` | `2` | `N` for directional clone. |
 
 `placement_use_tangent_fallback` and `placement_feasibility` are applied in
 `train.py` when building the frame (they resolve `n_hat`/`valid`/`scale`); the
@@ -288,7 +300,8 @@ is still written to `experiment_config.json`.
 
 - **[flag]** Ablation switches mirroring the existing `--no_lvl1_floaters` style:
   `--placement_mode`, `--no_placement_feasibility`,
-  `--no_placement_use_tangent_fallback`, `--placement_rho`, `--placement_knn_k`.
+  `--no_placement_use_tangent_fallback`, `--no_placement_directional_clone`,
+  `--placement_rho`, `--placement_knn_k`, `--placement_clone_children`.
   Always written to `experiment_config.json`.
 
 ### 4.6 No changes
@@ -310,7 +323,7 @@ comparable.
 | 5a mode-splitting (Goal 2b) | `+n̂` child `seg_hist` biased to `a`, `−n̂` to `b`; evidence still `× discount`. Hist-only first (features inherited); feature transfer behind a flag. | Starting design measured; boundary mIoU gain not already saturated. |
 | 5b anisotropic orientation (Goal 2c) | Child major axis → boundary tangent; minor → `n̂`. Semantic analogue of the long-axis split. | After 5a, or if coverage-at-count is the bottleneck. |
 | 5c multiplicity (Goal 1a) | `N = f(structure, entropy)`: boundary → 3–4, ambiguous → 2 (doc 02 §5). | **Only after** a stopping rule exists; see §8. |
-| 5d interior directional clone (Goal 1b) | Replace the verbatim duplicate with an offset pair; direction from `n̂` or `∇seg_encoding`. | After placement is validated. |
+| 5d interior directional clone (Goal 1b) | **[done]** clone appends `placement_clone_children` (=2) placed children: `x ± ρ·σ_major·dir`, `dir = n̂` (boundary) else the in-plane `tangent`. Parent kept; a fallback random pair when no direction. | implemented 2026-11-14; the reach/height feasibility gate is **not** applied to clone yet (in-plane tangent, low off-surface risk). |
 | 5e stronger `n̂` | Local LDA least-squares, triple-junction third class, 2D boundary back-projection. | If 5a diagnostics show the mean-difference direction is noisy. |
 
 **Non-goals for the second stage:** kernel changes; a merge/consolidate operator;

@@ -18,9 +18,12 @@
 #   python scripts/inspect_split_placement.py <model_dir> [<model_dir> ...]
 #   python scripts/inspect_split_placement.py --tol 1e-4 <model_dir>
 #
-# A `--placement_mode random` run is expected to report placed_frac ~ 0; a
-# `boundary_normal` run reports the fraction of splits that actually used a
-# deterministic direction.
+# A `--placement_mode random` run is expected to report split placed_frac ~ 0;
+# a `boundary_normal` run reports the fraction of splits that actually used a
+# deterministic direction. For clones: a vanilla clone is a coincident duplicate
+# (child offset ~ 0, `clone_directional_frac ~ 0`), whereas stage-2 directional
+# clone has symmetric children with a non-zero offset (`clone_directional_frac`
+# high, `clone_multi_frac = 1`).
 
 import argparse
 import os
@@ -34,19 +37,28 @@ sys.path.insert(0, ROOT)
 from sgdense import load_events  # noqa: E402
 
 
-def split_placement_stats(log, tol=1e-4):
-    """Classify each split parent as placed (symmetric children) or random.
+def split_placement_stats(log, tol=1e-4, off_tol=1e-6):
+    """Classify each split/clone parent as *placed* (deterministic) or not.
 
-    Returns a dict with population totals, the placed fraction, the median
-    midpoint deviation for each class (a sanity gap), and per-event counts.
+    Split: deterministic placement is symmetric about the parent (midpoint ==
+    parent); random N(0,Sigma) is not.
+
+    Clone: a vanilla clone is a coincident duplicate (child offset ~ 0); a
+    stage-2 directional clone has symmetric children with a non-zero offset.
+
+    Returns population totals, placement fractions, median deviations, and
+    per-event split counts.
     """
     n_events = n_clone = n_split = placed = total = 0
     dev_placed, dev_other = [], []
+    clone_total = clone_multi = clone_directional = 0
+    clone_offs = []
     per_event = []
 
     for ev in log.events:
         n_events += 1
         n_clone += sum(int(x["parent_gid"].numel()) for x in ev.get("clone", []))
+
         for x in ev.get("split", []):
             parent = x["parent_xyz"]
             kids = x["child_xyz"]
@@ -67,10 +79,30 @@ def split_placement_stats(log, tol=1e-4):
             dev_other.append(dev[~pk])
             per_event.append(dict(iter=ev["iter"], K=K, placed=int(pk.sum())))
 
+        for x in ev.get("clone", []):
+            parent = x["parent_xyz"]
+            kids = x["child_xyz"]
+            K = int(x["parent_gid"].numel())
+            N = int(x.get("N", 1))
+            clone_total += K
+            if K and N > 1:
+                clone_multi += K
+            if K == 0 or kids.shape[0] != K * N:
+                continue
+            kids_t = kids.reshape(N, K, 3)                       # [N,K,3]
+            mid = kids_t.mean(dim=0)
+            dev = (mid - parent).norm(dim=1)                     # [K]
+            offs = (kids_t - parent.unsqueeze(0)).norm(dim=2).mean(dim=0)   # [K]
+            thr = tol * (1.0 + parent.norm(dim=1))
+            directional = (dev <= thr) & (offs > off_tol)
+            clone_directional += int(directional.sum())
+            clone_offs.append(offs)
+
     def _cat(xs):
         return torch.cat(xs) if xs else torch.zeros(0)
 
     dp, do = _cat(dev_placed), _cat(dev_other)
+    co = _cat(clone_offs)
     denom = n_clone + n_split
     return dict(
         n_events=n_events,
@@ -82,6 +114,11 @@ def split_placement_stats(log, tol=1e-4):
         placed_frac=(placed / total if total else 0.0),
         dev_placed_median=(float(dp.median()) if dp.numel() else None),
         dev_other_median=(float(do.median()) if do.numel() else None),
+        clone_parents_total=clone_total,
+        clone_multi_frac=(clone_multi / clone_total if clone_total else 0.0),
+        clone_directional=clone_directional,
+        clone_directional_frac=(clone_directional / clone_total if clone_total else 0.0),
+        clone_offset_median=(float(co.median()) if co.numel() else None),
         per_event=per_event,
     )
 
@@ -90,17 +127,20 @@ def _print(name, st):
     print(f"\n=== {name} ===")
     print(f"events={st['n_events']}  clone parents={st['n_clone_parents']}  "
           f"split parents={st['n_split_parents']}  (clone share={st['clone_share']:.1%})")
-    print(f"split parents scored: {st['split_parents_total']}")
-    print(f"PLACED (deterministic): {st['placed']}  "
-          f"-> placed_frac={st['placed_frac']:.3f}")
-    print(f"midpoint dev: placed median={st['dev_placed_median']}  "
+    print(f"SPLIT  parents scored={st['split_parents_total']}  "
+          f"placed(deterministic)={st['placed']}  placed_frac={st['placed_frac']:.3f}")
+    print(f"       midpoint dev: placed median={st['dev_placed_median']}  "
           f"random median={st['dev_other_median']}")
+    print(f"CLONE  parents scored={st['clone_parents_total']}  "
+          f"multi-child frac={st['clone_multi_frac']:.3f}  "
+          f"directional_frac={st['clone_directional_frac']:.3f}  "
+          f"offset median={st['clone_offset_median']}")
     pe = [e for e in st["per_event"] if not e.get("skipped")]
     if pe:
         ps = [(e["placed"] / e["K"]) if e["K"] else 0.0 for e in pe]
         fin = [p for p in ps if p == p]
         if fin:
-            print(f"per-event placed_frac: first={fin[0]:.3f} last={fin[-1]:.3f} "
+            print(f"per-event split placed_frac: first={fin[0]:.3f} last={fin[-1]:.3f} "
                   f"min={min(fin):.3f} max={max(fin):.3f}")
 
 
