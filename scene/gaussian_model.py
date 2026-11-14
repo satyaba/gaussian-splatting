@@ -571,7 +571,8 @@ class GaussianModel:
             self.seg_top1_cnt[vis] += hit[:, None].float()
             first = labeled & (~hit) & (self.seg_top1_cnt[vis, 0] == 0)
             self.seg_top1[vis] = torch.where(first, lab, prev)
-            self.seg_top1_cnt[vis] = torch.where(first, torch.ones_like(self.seg_top1_cnt[vis]), self.seg_top1_cnt[vis])
+            cnt = self.seg_top1_cnt[vis]
+            self.seg_top1_cnt[vis] = torch.where(first[:, None], torch.ones_like(cnt), cnt)
 
     def add_densification_stats(self, viewspace_point_tensor, update_filter):
         self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
