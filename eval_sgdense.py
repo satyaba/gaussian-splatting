@@ -22,6 +22,7 @@ from scene.segmentation_decoder import SegmentationDecoder, load_decoder_checkpo
 from gaussian_renderer import render
 from utils.general_utils import safe_state
 from arguments import ModelParams, PipelineParams, get_combined_args
+from sgdense.evalmetrics import seg_boundary_mask, region_psnr
 
 try:
     from diff_gaussian_rasterization import SparseGaussianAdam  # noqa: F401
@@ -86,12 +87,14 @@ def _plot_samples(samples, name, palette, num_classes, out_dir=None, col_width=4
     plt.close(fig)
 
 
-def evaluate(gaussians, scene, dataset, pipe, decoder, cams, name, lp, ssim_fn, palette, num_samples):
+def evaluate(gaussians, scene, dataset, pipe, decoder, cams, name, lp, ssim_fn, palette,
+             num_samples, boundary_dilate=3):
     bg = torch.tensor([1, 1, 1] if dataset.white_background else [0, 0, 0],
                       dtype=torch.float32, device="cuda")
     num_classes = dataset.num_segmentation_classes
 
     psnrs, ssims, lpipss = [], [], []
+    psnrs_b, lpipss_b, psnrs_i, lpipss_i = [], [], [], []
     conf = torch.zeros(num_classes, num_classes, dtype=torch.long, device="cuda")
     per_view, samples = [], []
     sample_idx = set(np.linspace(0, len(cams) - 1, min(num_samples, len(cams)), dtype=int).tolist())
@@ -102,13 +105,40 @@ def evaluate(gaussians, scene, dataset, pipe, decoder, cams, name, lp, ssim_fn, 
             g = v.original_image[0:3].to("cuda")[None]
             mse = ((r - g) ** 2).mean().item()
             p = -10 * np.log10(max(mse, 1e-12))
+            s = ssim_fn(r, g, data_range=1.0).item()
+            l = lp(r * 2 - 1, g * 2 - 1).item()
             psnrs.append(p)
-            ssims.append(ssim_fn(r, g, data_range=1.0).item())
-            lpipss.append(lp(r * 2 - 1, g * 2 - 1).item())
-            per_view.append((v.image_name, p))
+            ssims.append(s)
+            lpipss.append(l)
+
+            gt_seg = getattr(v, "gt_segmentation", None)
+
+            # Region-restricted photometric/perceptual metrics from the GT class map
+            # (docs/08 section 7.10): boundary band vs interior. No decoder needed.
+            psnr_b = lpips_b = psnr_i = lpips_i = float("nan")
+            frac_b = 0.0
+            if num_classes > 0 and gt_seg is not None:
+                gt_np = gt_seg.detach().cpu().numpy().squeeze()
+                band = seg_boundary_mask(gt_np, num_classes, IGNORE_ID, boundary_dilate)
+                frac_b = float(band.mean())
+                if band.any():
+                    r_np, g_np = _to_img(r[0]), _to_img(g[0])
+                    psnr_b = region_psnr(r_np, g_np, band)
+                    psnr_i = region_psnr(r_np, g_np, ~band)
+                    mt = torch.from_numpy(band).to("cuda")[None, None]   # [1,1,H,W]
+                    # zero the complement in BOTH images so LPIPS sees only the band
+                    lpips_b = lp((r * mt) * 2 - 1, (g * mt) * 2 - 1).item()
+                    lpips_i = lp((r * (1 - mt)) * 2 - 1, (g * (1 - mt)) * 2 - 1).item()
+                    psnrs_b.append(psnr_b); lpipss_b.append(lpips_b)
+                    psnrs_i.append(psnr_i); lpipss_i.append(lpips_i)
+
+            per_view.append(dict(
+                name=v.image_name, psnr=p, ssim=s, lpips=l,
+                psnr_boundary=psnr_b, lpips_boundary=lpips_b,
+                psnr_interior=psnr_i, lpips_interior=lpips_i,
+                boundary_frac=frac_b))
 
             pred = gt = None
-            gt_seg = getattr(v, "gt_segmentation", None)
             if decoder is not None and gt_seg is not None:
                 pkg = render(v, gaussians, pipe, bg)
                 seg_feat = pkg["rendered_seg"]                       # [C_ENC, H, W]
@@ -127,15 +157,27 @@ def evaluate(gaussians, scene, dataset, pipe, decoder, cams, name, lp, ssim_fn, 
                     pred_seg=pred.cpu() if pred is not None else torch.full_like(r[0, 0], IGNORE_ID, dtype=torch.long),
                 ))
 
+    def _mean(xs):
+        xs = [x for x in xs if np.isfinite(x)]
+        return float(np.mean(xs)) if xs else None
+
     print(f"\n[{name}] {len(cams)} views | PSNR {np.mean(psnrs):.2f} | "
           f"SSIM {np.mean(ssims):.4f} | LPIPS {np.mean(lpipss):.4f}")
-    print("  worst 3 by PSNR:", [(n, round(p, 2)) for n, p in sorted(per_view, key=lambda x: x[1])[:3]])
+    print("  worst 3 by PSNR:", [(n, round(p, 2)) for n, p in sorted([(d['name'], d['psnr']) for d in per_view], key=lambda x: x[1])[:3]])
+    if psnrs_b:
+        print(f"  boundary-restricted: PSNR {_mean(psnrs_b):.2f} | LPIPS {_mean(lpipss_b):.4f} "
+              f"| interior: PSNR {_mean(psnrs_i):.2f} | LPIPS {_mean(lpipss_i):.4f}")
 
     metrics = {
         "num_views": len(cams),
         "psnr": float(np.mean(psnrs)),
         "ssim": float(np.mean(ssims)),
         "lpips": float(np.mean(lpipss)),
+        "psnr_boundary": _mean(psnrs_b),
+        "lpips_boundary": _mean(lpipss_b),
+        "psnr_interior": _mean(psnrs_i),
+        "lpips_interior": _mean(lpipss_i),
+        "per_view": per_view,
     }
 
     if decoder is not None and conf.sum() > 0:
@@ -157,7 +199,8 @@ def evaluate(gaussians, scene, dataset, pipe, decoder, cams, name, lp, ssim_fn, 
     return samples, metrics
 
 
-def run(dataset, iteration, pipe, skip_train, skip_test, num_samples, out_dir, json_out=None):
+def run(dataset, iteration, pipe, skip_train, skip_test, num_samples, out_dir, json_out=None,
+        boundary_dilate=3):
     # A vanilla (upstream graphdeco) cfg_args carries no segmentation fields;
     # default them so this fork's loader/renderer can score vanilla PLYs too.
     for k, v in (("seg_encoding_dim", 32), ("num_segmentation_classes", 0),
@@ -204,7 +247,7 @@ def run(dataset, iteration, pipe, skip_train, skip_test, num_samples, out_dir, j
         if not cams:
             continue
         samples, metrics = evaluate(gaussians, scene, dataset, pipe, decoder, cams, name,
-                                    lp, ssim_fn, palette, num_samples)
+                                    lp, ssim_fn, palette, num_samples, boundary_dilate)
         results["splits"][name] = metrics
         if decoder is not None:
             _plot_samples(samples, name, palette, dataset.num_segmentation_classes, out_dir=out_dir)
@@ -227,10 +270,12 @@ if __name__ == "__main__":
     parser.add_argument("--num_samples", default=4, type=int)
     parser.add_argument("--out_dir", default="", type=str, help="if set, save sample grids here")
     parser.add_argument("--json_out", default="", type=str, help="if set, write metrics JSON here")
+    parser.add_argument("--boundary_dilate", default=3, type=int,
+                        help="dilation (px) of the GT class-boundary band for region metrics")
     parser.add_argument("--quiet", action="store_true")
     args = get_combined_args(parser)
     print("Evaluating " + args.model_path)
     safe_state(args.quiet)
     run(model.extract(args), args.iteration, pipeline.extract(args),
         args.skip_train, args.skip_test, args.num_samples, args.out_dir or None,
-        args.json_out or None)
+        args.json_out or None, args.boundary_dilate)
