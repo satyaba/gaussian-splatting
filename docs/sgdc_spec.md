@@ -114,11 +114,15 @@ class ReplicaLabelAdapter(LabelAdapter): ...   # reads Replica GT PNGs  (in scop
 
 `SemanticStore` loads `L_v`, **nearest-neighbor** resizes to `[H_v,W_v]` (ids must never be bilinearly interpolated), computes `dt_v`/`n_v`, and caches.
 
-### 2.1 Replica labels (in scope)
+### 2.1 Replica labels (in scope) — CONFIRMED
 
-Replica ships per-frame GT `semantic_class` and `semantic_instance` PNGs. The adapter maps `image_name → label files` and maps the undefined/ignore id (commonly `0`) to `void`. It builds the composite id as `seg = class_id * K_inst_max + instance_id` (or a fitted `(class,instance)` pair via `np.unique`), remapping to a contiguous range.
+Confirmed layout (the COLMAP scene *is* `DATASET_DIR`, so `-s DATASET_DIR` works):
 
-> **Exact folder layout + filename convention: TBD pending dataset inspection** (see §2.4).
+- `images/rgb_<N>.png`, `sparse/` (COLMAP), `depth/`, `traj_w_c.txt`
+- `semantic_class/rgb_<N>.png` — GT **class** labels, native `480×640`, uint8
+- `semantic_instance/` **absent** in this copy → composite **degenerates to class-only**
+
+Sparse Replica class ids (`0 12 17 20 … 98`; 16 present per frame) are remapped to a contiguous range `1..K`; `void_ids` (default `{0}`, **to confirm**) collapse to `0`. `ReplicaLabelAdapter` resolves labels by filename **stem** (`rgb_0.png` ↔ `rgb_0.png`), so it is robust to extension differences. Implementation: `sgdc/datasets/replica.py`.
 
 ### 2.2 Precompute — `src/sgdc/precompute.py`
 
