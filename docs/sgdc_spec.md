@@ -148,14 +148,14 @@ Between refine steps, accumulate per-Gaussian statistics from *visible* projecti
 
 ### 3.1 Projection of a Gaussian center into view $v$
 
-Using `full_proj_transform` `P` (cameras.py:88), for mean $\mu$:
+Using `full_proj_transform` `P` (cameras.py:88; column-major, as read by CUDA), for mean $\mu$:
 
 $$
-\tilde p = P\,[\mu;1]^\top,\quad p=\tilde p_{1:3}/\tilde p_4,\quad
+\tilde p = [\mu;1]\,P,\quad p=\tilde p_{1:3}/\tilde p_4,\quad
 u=\tfrac{(p_x+1)\,W-1}{2},\quad v=\tfrac{(p_y+1)\,H-1}{2}.
 $$
 
-> Convention check: `getProjectionMatrix` already flips $y$ for image orientation; verify once against a rendered view (if vertically flipped, use $v=\tfrac{(1-p_y)H-1}{2}$). Clamp indices to `[0,W-1]×[0,H-1]`; discard if $\tilde p_4\le0$ (behind camera).
+> Convention confirmed against `diff-gaussian-rasterization` (`auxiliary.h`): `ndc2Pix(v,S)=((v+1)S-1)/2` for both axes (no $y$-flip), and CUDA reads `full_proj_transform` column-major, so the row-vector product $[\mu;1]P$ is required (equivalently $P^\top[\mu;1]^\top$). Clamp indices to `[0,W-1]×[0,H-1]`; discard if $\tilde p_4\le0$.
 
 ### 3.2 Buffers
 

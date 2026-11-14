@@ -97,6 +97,13 @@ class OptimizationParams(ParamGroup):
         self.depth_l1_weight_final = 0.01
         self.random_background = False
         self.optimizer_type = "default"
+        # --- SGDC (Segmentation-Guided Density Control) ---
+        self.sgdc_enable = False        # master switch
+        self.sgdc_adapter = "replica"   # label adapter name (sgdc/datasets)
+        self.f_b = 0.5                  # boundary threshold factor (tau near boundary)
+        self.f_int = 2.0               # interior threshold factor (tau in interior)
+        self.eta = 0.3                  # split-threshold shrink near boundary
+        self.sgdc_dt_norm = 100.0       # px normalizer for boundary distance d_i
         super().__init__(parser, "Optimization Parameters")
 
 def get_combined_args(parser : ArgumentParser):

@@ -60,6 +60,15 @@ class GaussianModel:
         self.max_radii2D = torch.empty(0)
         self.xyz_gradient_accum = torch.empty(0)
         self.denom = torch.empty(0)
+        # --- SGDC semantic signature buffers (see docs/sgdc_spec.md §3) ---
+        self.seg_top1 = torch.empty(0)
+        self.seg_top1_cnt = torch.empty(0)
+        self.seg_tot_cnt = torch.empty(0)
+        self.seg_void_cnt = torch.empty(0)
+        self.seg_dt_sum = torch.empty(0)
+        self.seg_norm_sum = torch.empty(0)
+        self.semantic_store = None
+        self.sgdc_enable = False
         self.optimizer = None
         self.percent_dense = 0
         self.spatial_lr_scale = 0
@@ -179,6 +188,20 @@ class GaussianModel:
         self.percent_dense = training_args.percent_dense
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+
+        # --- SGDC config + semantic buffers (docs/sgdc_spec.md §3.2) ---
+        self.sgdc_enable = getattr(training_args, "sgdc_enable", False)
+        self.sgdc_f_b = getattr(training_args, "f_b", 0.5)
+        self.sgdc_f_int = getattr(training_args, "f_int", 2.0)
+        self.sgdc_eta = getattr(training_args, "eta", 0.3)
+        self.sgdc_dt_norm = getattr(training_args, "sgdc_dt_norm", 100.0)
+        _n = self.get_xyz.shape[0]
+        self.seg_top1 = torch.zeros((_n,), device="cuda", dtype=torch.long)
+        self.seg_top1_cnt = torch.zeros((_n, 1), device="cuda")
+        self.seg_tot_cnt = torch.zeros((_n, 1), device="cuda")
+        self.seg_void_cnt = torch.zeros((_n, 1), device="cuda")
+        self.seg_dt_sum = torch.zeros((_n, 1), device="cuda")
+        self.seg_norm_sum = torch.zeros((_n, 1), device="cuda")
 
         l = [
             {'params': [self._xyz], 'lr': training_args.position_lr_init * self.spatial_lr_scale, "name": "xyz"},
@@ -362,6 +385,13 @@ class GaussianModel:
         self.denom = self.denom[valid_points_mask]
         self.max_radii2D = self.max_radii2D[valid_points_mask]
         self.tmp_radii = self.tmp_radii[valid_points_mask]
+        if self.sgdc_enable:
+            self.seg_top1 = self.seg_top1[valid_points_mask]
+            self.seg_top1_cnt = self.seg_top1_cnt[valid_points_mask]
+            self.seg_tot_cnt = self.seg_tot_cnt[valid_points_mask]
+            self.seg_void_cnt = self.seg_void_cnt[valid_points_mask]
+            self.seg_dt_sum = self.seg_dt_sum[valid_points_mask]
+            self.seg_norm_sum = self.seg_norm_sum[valid_points_mask]
 
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
@@ -385,7 +415,7 @@ class GaussianModel:
 
         return optimizable_tensors
 
-    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_tmp_radii):
+    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_tmp_radii, new_seg_top1=None):
         d = {"xyz": new_xyz,
         "f_dc": new_features_dc,
         "f_rest": new_features_rest,
@@ -402,18 +432,32 @@ class GaussianModel:
         self._rotation = optimizable_tensors["rotation"]
 
         self.tmp_radii = torch.cat((self.tmp_radii, new_tmp_radii))
-        self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
-        self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
-        self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
-    def densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
+        if self.sgdc_enable and new_seg_top1 is not None:
+            self.seg_top1 = torch.cat((self.seg_top1, new_seg_top1))
+
+        _n = self.get_xyz.shape[0]
+        self.xyz_gradient_accum = torch.zeros((_n, 1), device="cuda")
+        self.denom = torch.zeros((_n, 1), device="cuda")
+        self.max_radii2D = torch.zeros((_n), device="cuda")
+
+        if self.sgdc_enable:
+            self.seg_top1_cnt = torch.zeros((_n, 1), device="cuda")
+            self.seg_tot_cnt = torch.zeros((_n, 1), device="cuda")
+            self.seg_void_cnt = torch.zeros((_n, 1), device="cuda")
+            self.seg_dt_sum = torch.zeros((_n, 1), device="cuda")
+            self.seg_norm_sum = torch.zeros((_n, 1), device="cuda")
+
+    def densify_and_split(self, grads, tau, theta, scene_extent, N=2):
         n_init_points = self.get_xyz.shape[0]
-        # Extract points that satisfy the gradient condition
+        # Extract points that satisfy the per-point gradient condition
         padded_grad = torch.zeros((n_init_points), device="cuda")
-        padded_grad[:grads.shape[0]] = grads.squeeze()
-        selected_pts_mask = torch.where(padded_grad >= grad_threshold, True, False)
+        padded_grad[:grads.shape[0]] = grads.reshape(-1)
+        padded_tau = torch.zeros((n_init_points), device="cuda")
+        padded_tau[:tau.shape[0]] = tau
+        selected_pts_mask = torch.where(padded_grad >= padded_tau, True, False)
         selected_pts_mask = torch.logical_and(selected_pts_mask,
-                                              torch.max(self.get_scaling, dim=1).values > self.percent_dense*scene_extent)
+                                              torch.max(self.get_scaling, dim=1).values > theta)
 
         stds = self.get_scaling[selected_pts_mask].repeat(N,1)
         means =torch.zeros((stds.size(0), 3),device="cuda")
@@ -426,17 +470,18 @@ class GaussianModel:
         new_features_rest = self._features_rest[selected_pts_mask].repeat(N,1,1)
         new_opacity = self._opacity[selected_pts_mask].repeat(N,1)
         new_tmp_radii = self.tmp_radii[selected_pts_mask].repeat(N)
+        new_seg_top1 = self.seg_top1[selected_pts_mask].repeat(N) if self.sgdc_enable else None
 
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_tmp_radii)
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_tmp_radii, new_seg_top1)
 
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
         self.prune_points(prune_filter)
 
-    def densify_and_clone(self, grads, grad_threshold, scene_extent):
-        # Extract points that satisfy the gradient condition
-        selected_pts_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
+    def densify_and_clone(self, grads, tau, theta):
+        # Extract points that satisfy the per-point gradient condition
+        selected_pts_mask = torch.where(torch.norm(grads, dim=-1) >= tau, True, False)
         selected_pts_mask = torch.logical_and(selected_pts_mask,
-                                              torch.max(self.get_scaling, dim=1).values <= self.percent_dense*scene_extent)
+                                              torch.max(self.get_scaling, dim=1).values <= theta)
         
         new_xyz = self._xyz[selected_pts_mask]
         new_features_dc = self._features_dc[selected_pts_mask]
@@ -446,16 +491,34 @@ class GaussianModel:
         new_rotation = self._rotation[selected_pts_mask]
 
         new_tmp_radii = self.tmp_radii[selected_pts_mask]
+        new_seg_top1 = self.seg_top1[selected_pts_mask] if self.sgdc_enable else None
 
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_tmp_radii)
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_tmp_radii, new_seg_top1)
+
+    def compute_sgdc_thresholds(self, grad_threshold, scene_extent):
+        """Per-Gaussian densification threshold tau_i and split gate theta_i (spec §4A)."""
+        tot = self.seg_tot_cnt.squeeze(-1).clamp_min(1.0)
+        d = (self.seg_dt_sum.squeeze(-1) / tot) / max(self.sgdc_dt_norm, 1e-6)
+        d = d.clamp(0.0, 1.0)
+        tau = grad_threshold * (self.sgdc_f_b * (1.0 - d) + self.sgdc_f_int * d)
+        theta = self.percent_dense * scene_extent * (1.0 - self.sgdc_eta * (1.0 - d))
+        return tau, theta
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, radii):
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
 
         self.tmp_radii = radii
-        self.densify_and_clone(grads, max_grad, extent)
-        self.densify_and_split(grads, max_grad, extent)
+
+        if self.sgdc_enable:
+            tau, theta = self.compute_sgdc_thresholds(max_grad, extent)
+        else:
+            _n = self.get_xyz.shape[0]
+            tau = torch.full((_n,), max_grad, device="cuda")
+            theta = torch.full((_n,), self.percent_dense * extent, device="cuda")
+
+        self.densify_and_clone(grads, tau, theta)
+        self.densify_and_split(grads, tau, theta, extent)
 
         prune_mask = (self.get_opacity < min_opacity).squeeze()
         if max_screen_size:
@@ -467,6 +530,48 @@ class GaussianModel:
         self.tmp_radii = None
 
         torch.cuda.empty_cache()
+
+    def add_semantic_stats(self, camera, visibility_filter, store):
+        """Accumulate per-Gaussian semantic signature from visible projections (spec §3.3)."""
+        if store is None:
+            return
+        vis = visibility_filter.squeeze(-1)
+        if vis.numel() == 0:
+            return
+        H, W = int(camera.image_height), int(camera.image_width)
+        sem = store.get(camera.image_name, H, W)
+        if sem is None:
+            return
+        label, dt = sem["label"], sem["dt"]
+        with torch.no_grad():
+            mu = self.get_xyz[vis]
+            P = camera.full_proj_transform
+            ones = torch.ones((mu.shape[0], 1), device=mu.device, dtype=mu.dtype)
+            # Match CUDA's transformPoint4x4 (column-major read): p = [mu;1] @ P.
+            p = torch.cat([mu, ones], dim=1) @ P
+            ndc = p[:, :3] / p[:, 3:4].clamp_min(1e-6)
+            # ndc2Pix(v, S) = ((v + 1) * S - 1) / 2   (rasterizer/auxiliary.h)
+            u = ((ndc[:, 0] + 1) * W - 1) / 2
+            v = ((ndc[:, 1] + 1) * H - 1) / 2
+            ui = u.round().long().clamp(0, W - 1)
+            vi = v.round().long().clamp(0, H - 1)
+            lab = label[vi, ui]
+            d = dt[vi, ui].unsqueeze(-1)
+
+            void = lab == 0
+            labeled = ~void
+
+            self.seg_tot_cnt[vis] += labeled[:, None].float()
+            self.seg_void_cnt[vis] += void[:, None].float()
+            self.seg_dt_sum[vis] += d
+            self.seg_norm_sum[vis] += 1.0
+
+            prev = self.seg_top1[vis]
+            hit = labeled & (lab == prev)
+            self.seg_top1_cnt[vis] += hit[:, None].float()
+            first = labeled & (~hit) & (self.seg_top1_cnt[vis, 0] == 0)
+            self.seg_top1[vis] = torch.where(first, lab, prev)
+            self.seg_top1_cnt[vis] = torch.where(first, torch.ones_like(self.seg_top1_cnt[vis]), self.seg_top1_cnt[vis])
 
     def add_densification_stats(self, viewspace_point_tensor, update_filter):
         self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)

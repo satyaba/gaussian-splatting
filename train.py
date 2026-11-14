@@ -50,6 +50,15 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
+
+    # --- SGDC semantic store (docs/sgdc_spec.md §2.3) ---
+    if getattr(opt, "sgdc_enable", False):
+        from sgdc.datasets import get_adapter
+        from sgdc.semantic_store import SemanticStore
+        adapter = get_adapter(getattr(opt, "sgdc_adapter", "replica"), dataset.source_path, {})
+        gaussians.semantic_store = SemanticStore(adapter, device="cuda")
+        print("[SGDC] label adapter:", adapter.meta())
+
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
@@ -165,6 +174,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 # Keep track of max radii in image-space for pruning
                 gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
                 gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
+                if getattr(gaussians, "sgdc_enable", False):
+                    gaussians.add_semantic_stats(viewpoint_cam, visibility_filter, gaussians.semantic_store)
 
                 if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
