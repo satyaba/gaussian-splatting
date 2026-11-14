@@ -79,24 +79,62 @@ SGDC conditions every one of these on the **semantic signature** of Gaussian $i$
 
 ## 2. Semantic input pipeline
 
-### 2.1 Offline labeling
+### 2.0 Segment definition & label sources
 
-For each **training** image, produce a label map `L_v : H×W → {0,…,K}` (0 = `void`). Stored as 16-bit PNG at:
+A **segment** is the composite id `seg = (class_id, instance_id)`. Components pick their view:
 
+- **A** (thresholds) keys on **class** boundaries;
+- **B** (budgets) uses the composite unit — instance for objects, class for structures;
+- **D** (consistency) keys on **instance** (strongest cross-view signal).
+
+**Scope now: Replica only** (GT labels already present). SAM2 / 2D-semantic adapters are designed below but deferred.
+
+Canonical contract consumed by SGDC (all aligned to `camera.image_height × camera.image_width`; **`0` = void**):
+
+| Object | Type | Meaning |
+|---|---|---|
+| `L_v` | `int32 [H,W]` | composite segment id per pixel |
+| `dt_v` | `float [H,W]` | distance transform to nearest label boundary (px) |
+| `n_v` | `float [H,W,2]` | unit boundary normal (`∇dt`) |
+| `area_c`,`perim_c` | per-segment | for Component B |
+
+Adapter layer `src/sgdc/datasets/`:
+
+```python
+class LabelAdapter:                       # base
+    name: str
+    def resolve(self, image_name) -> Path | None    # label file(s) for this frame
+    def load_raw(self, path) -> np.ndarray          # native HxW ints
+    def to_canonical(self, raw) -> np.ndarray       # remap ids, set void, class/instance
+    def meta(self) -> dict                          # {"K","ignore_ids","source"}
+
+class ReplicaLabelAdapter(LabelAdapter): ...   # reads Replica GT PNGs  (in scope)
+# SAM2LabelAdapter / SemsegAdapter             -> deferred
 ```
-<source_path>/seg/<image_name>.png      # label id per pixel
-<source_path>/seg_meta.json             # {"K": …, "id_to_name": …, "source": "sam2|semseg"}
-```
 
-Per-view precomputations (cached `.npz`, computed by `src/sgdc/precompute.py`):
+`SemanticStore` loads `L_v`, **nearest-neighbor** resizes to `[H_v,W_v]` (ids must never be bilinearly interpolated), computes `dt_v`/`n_v`, and caches.
+
+### 2.1 Replica labels (in scope)
+
+Replica ships per-frame GT `semantic_class` and `semantic_instance` PNGs. The adapter maps `image_name → label files` and maps the undefined/ignore id (commonly `0`) to `void`. It builds the composite id as `seg = class_id * K_inst_max + instance_id` (or a fitted `(class,instance)` pair via `np.unique`), remapping to a contiguous range.
+
+> **Exact folder layout + filename convention: TBD pending dataset inspection** (see §2.4).
+
+### 2.2 Precompute — `src/sgdc/precompute.py`
+
+Per-view, cached `.npz` at training resolution:
 
 - `dt_v`  — Euclidean **distance transform** to nearest label boundary (pixels)
 - `gdt_v` — gradient/normal field of `dt_v` (per-pixel unit normal `n_v` pointing away from boundary)
 - `perim_c`, `area_c` — per-segment perimeter and area (for Component B)
 
-### 2.2 Loading — `src/sgdc/semantic_store.py`
+### 2.3 Loading — `src/sgdc/semantic_store.py`
 
 A standalone `SemanticStore(source_path, device)` keyed by `image_name`, returning `L_v`, `dt_v`, `gdt_v` on GPU on demand. **No change to the `Camera` constructor** — `image_name` (cameras.py:33) is the key.
+
+### 2.4 Alignment verification
+
+One-time check (`src/sgdc/verify_alignment.py`): overlay `dt_v` boundaries on the RGB/render frame and assert pixel alignment; confirm the NDC $y$-convention from §3.1. Catches the most common failure (label/image resolution mismatch).
 
 ---
 
