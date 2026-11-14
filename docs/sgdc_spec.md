@@ -21,6 +21,10 @@
 - `arguments/__init__.py` — `OptimizationParams` (**lines 74–100**)
 - `scene/cameras.py` — `Camera` fields (**lines 19–89**)
 
+### Build prerequisites (Colab / modern toolchains)
+
+On CUDA 12.9 / GCC 14 / Python 3.13 the CUDA submodules fail with `uint32_t`/`uint64_t`/`std::uintptr_t` undefined (missing `<cstdint>`). Fix: `bash scripts/patch_cuda_submodules.sh`, then `pip install .` each of `submodules/diff-gaussian-rasterization`, `submodules/simple-knn`, `submodules/fused-ssim` with `TORCH_CUDA_ARCH_LIST` set to the GPU arch (T4=7.5, V100=7.0, A100=8.0, L4=8.9). Requires `ninja` for a reasonable build time.
+
 ---
 
 ## 1. Baseline density control (exact hooks we modify)
