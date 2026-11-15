@@ -46,6 +46,8 @@ def _band(label: np.ndarray, px: int) -> np.ndarray:
 
 
 def evaluate(dataset, iteration, pipeline, band_px, use_test):
+    # HLOC/COLMAP scenes here have no depth: force depth mode off.
+    dataset.depths = ""
     gaussians = GaussianModel(dataset.sh_degree)
     scene = Scene(dataset, gaussians, load_iteration=iteration, shuffle=False)
 
