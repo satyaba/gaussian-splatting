@@ -35,8 +35,8 @@ from experiments.runner import REPO_ROOT, prepare
 # Column order mirrors the experiment spreadsheet.
 CSV_COLUMNS = [
     "Name", "Run ID", "Iteration",
-    "Train PSNR", "Train SSIM", "Train LPIPS",
-    "Test PSNR", "Test SSIM", "Test LPIPS",
+    "Train PSNR", "Train SSIM", "Train LPIPS", "Train PSNR (boundary)",
+    "Test PSNR", "Test SSIM", "Test LPIPS", "Test PSNR (boundary)",
     "Gauss. count",
     "Train time (min)", "Eval time (s)",
 ]
@@ -72,9 +72,11 @@ def to_row(data: dict, run_id: Optional[str] = None, name: Optional[str] = None)
         "Train PSNR": _round(tr.get("psnr"), 2),
         "Train SSIM": _round(tr.get("ssim"), 4),
         "Train LPIPS": _round(tr.get("lpips"), 4),
+        "Train PSNR (boundary)": _round(tr.get("psnr_boundary"), 2),
         "Test PSNR": _round(te.get("psnr"), 2),
         "Test SSIM": _round(te.get("ssim"), 4),
         "Test LPIPS": _round(te.get("lpips"), 4),
+        "Test PSNR (boundary)": _round(te.get("psnr_boundary"), 2),
         "Gauss. count": data.get("gaussians"),
         "Train time (min)": _round(train_s / 60.0, 2) if train_s else "",
         "Eval time (s)": _round(eval_s, 1) if eval_s else "",
