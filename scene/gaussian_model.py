@@ -654,8 +654,8 @@ class GaussianModel:
         R = build_rotation(self._rotation[idx])
         S = self.get_scaling[idx]
         Sigma = R @ torch.diag_embed(S * S) @ R.transpose(1, 2)      # world cov
-        W3 = Wv[:3, :3]
-        Sigma_cam = W3 @ Sigma @ W3.t()
+        W3 = Wv[:3, :3]                                              # rasterizer W
+        Sigma_cam = W3.t() @ Sigma @ W3                              # = W^T Sigma W (CUDA: T^T Vrk T, T = W J)
         Sig2 = J @ Sigma_cam @ J.transpose(1, 2) + eps * torch.eye(2, device=mu_n.device, dtype=mu_n.dtype)
 
         lab_pix = label[vi[near], ui[near]]
