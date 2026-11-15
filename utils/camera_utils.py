@@ -74,7 +74,11 @@ def loadCam(args, id, cam_info, resolution_scale, is_nerf_synthetic, is_test_dat
         void_mask = seg == 255
         seg[void_mask] = -1  # ignore_index for cross-entropy (train.py)
         valid = seg[~void_mask]
-        if valid.size:
+        if valid.size and args.num_segmentation_classes > 0:
+            # Taxonomy check: only meaningful when a class count is configured
+            # (SGDense runs pass it). Eval-only runs with no class count (e.g. a
+            # vanilla baseline scored for boundary PSNR) still need the label map,
+            # so the check is skipped when the count is 0/unset.
             assert valid.max() < args.num_segmentation_classes, \
                 f"{cam_info.segmentation_path}: class id {valid.max()} >= num_segmentation_classes " \
                 f"({args.num_segmentation_classes}) — taxonomy mismatch?"
