@@ -18,7 +18,7 @@ import cv2
 import numpy as np
 import torch
 
-from arguments import ModelParams, PipelineParams
+from arguments import ModelParams, PipelineParams, get_combined_args
 from gaussian_renderer import render
 from scene import Scene, GaussianModel
 
@@ -90,7 +90,8 @@ if __name__ == "__main__":
     ap.add_argument("--iteration", default=-1, type=int)
     ap.add_argument("--boundary_band", default=4, type=int, help="dilation half-width in px")
     ap.add_argument("--use_test", action="store_true")
-    args = ap.parse_args()
+    # Merge saved cfg_args (so depths="", white_background, etc. match training).
+    args = get_combined_args(ap)
 
     evaluate(model.extract(args), args.iteration, pipe.extract(args),
              args.boundary_band, args.use_test)
