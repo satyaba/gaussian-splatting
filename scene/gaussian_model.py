@@ -9,6 +9,7 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 
+import math
 import torch
 import numpy as np
 from utils.general_utils import inverse_sigmoid, get_expon_lr_func, build_rotation
@@ -592,6 +593,82 @@ class GaussianModel:
             self.seg_top1[vis] = torch.where(first, lab, prev)
             cnt = self.seg_top1_cnt[vis]
             self.seg_top1_cnt[vis] = torch.where(first[:, None], torch.ones_like(cnt), cnt)
+
+    def boundary_loss(self, camera, visibility_filter, store, band_px=32.0, eps=1e-6):
+        """Cross-boundary scale regularizer (spec §4C).
+
+        Penalises projected Gaussian mass that crosses a semantic boundary:
+            psi_iv ~= 0.5 * erfc(z),  z = sd / sigma_perp,  sigma_perp = sqrt(n^T Sigma' n)
+        Minimising it elongates Gaussians tangentially and shrinks them normally at
+        boundaries, without removing any capacity (so it cannot regress interiors).
+        Only boundary-adjacent, labelled Gaussians are regularised.
+        """
+        zero = torch.zeros((), device=self.get_xyz.device)
+        if store is None:
+            return zero
+        vis = visibility_filter.squeeze(-1)
+        if vis.numel() == 0:
+            return zero
+        H, W = int(camera.image_height), int(camera.image_width)
+        sem = store.get(camera.image_name, H, W)
+        if sem is None:
+            return zero
+        label, dt, normal = sem["label"], sem["dt"], sem["normal"]
+
+        mu = self.get_xyz[vis]
+        ones = torch.ones((mu.shape[0], 1), device=mu.device, dtype=mu.dtype)
+
+        # Pixel coordinates (rasterizer convention: ndc2Pix, row-vector product).
+        P = camera.full_proj_transform
+        p = torch.cat([mu, ones], dim=1) @ P
+        ndc = p[:, :3] / p[:, 3:4].clamp_min(1e-6)
+        ui = (((ndc[:, 0] + 1) * W - 1) / 2).round().long().clamp(0, W - 1)
+        vi = (((ndc[:, 1] + 1) * H - 1) / 2).round().long().clamp(0, H - 1)
+        dt_pix = dt[vi, ui]
+        seg = self.seg_top1[vis]
+
+        near = (dt_pix < band_px) & (seg > 0)
+        if near.sum() == 0:
+            return zero
+        idx = vis[near]
+
+        # Projected 2D covariance for the boundary-adjacent subset.
+        mu_n = self.get_xyz[idx]
+        ones_n = ones[near]
+        Wv = camera.world_view_transform
+        t = (torch.cat([mu_n, ones_n], dim=1) @ Wv)[:, :3]
+        tz = t[:, 2].clamp_min(1e-6)
+        tanx = math.tan(camera.FoVx * 0.5)
+        tany = math.tan(camera.FoVy * 0.5)
+        fx = 0.5 * W / tanx
+        fy = 0.5 * H / tany
+        tx = torch.clamp(t[:, 0] / tz, -1.3 * tanx, 1.3 * tanx) * tz
+        ty = torch.clamp(t[:, 1] / tz, -1.3 * tany, 1.3 * tany) * tz
+        n_pts = mu_n.shape[0]
+        J = torch.zeros((n_pts, 2, 3), device=mu_n.device, dtype=mu_n.dtype)
+        J[:, 0, 0] = fx / tz
+        J[:, 0, 2] = -(fx * tx) / (tz * tz)
+        J[:, 1, 1] = fy / tz
+        J[:, 1, 2] = -(fy * ty) / (tz * tz)
+
+        R = build_rotation(self._rotation[idx])
+        S = self.get_scaling[idx]
+        Sigma = R @ torch.diag_embed(S * S) @ R.transpose(1, 2)      # world cov
+        W3 = Wv[:3, :3]
+        Sigma_cam = W3 @ Sigma @ W3.t()
+        Sig2 = J @ Sigma_cam @ J.transpose(1, 2) + eps * torch.eye(2, device=mu_n.device, dtype=mu_n.dtype)
+
+        lab_pix = label[vi[near], ui[near]]
+        sd = torch.where(lab_pix == seg[near], dt_pix[near], -dt_pix[near])
+        nrm = normal[vi[near], ui[near]]
+        nx, ny = nrm[:, 0], nrm[:, 1]
+        sig_perp = torch.sqrt(torch.clamp(
+            Sig2[:, 0, 0] * nx * nx + 2.0 * Sig2[:, 0, 1] * nx * ny + Sig2[:, 1, 1] * ny * ny,
+            min=eps))
+        z = sd / sig_perp
+        psi = 0.5 * torch.erfc(z / math.sqrt(2.0))
+        alpha = self.get_opacity[idx].squeeze(-1)
+        return (alpha * psi).sum() / max(vis.numel(), 1)
 
     def add_densification_stats(self, viewspace_point_tensor, update_filter):
         self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)

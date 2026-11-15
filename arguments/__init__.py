@@ -104,6 +104,9 @@ class OptimizationParams(ParamGroup):
         self.f_int = 2.0               # interior threshold factor (tau in interior)
         self.eta = 0.3                  # split-threshold shrink near boundary
         self.sgdc_dt_norm = 100.0       # px normalizer for boundary distance d_i
+        self.lambda_bnd = 0.0           # Component C: cross-boundary scale loss weight
+        self.sgdc_bnd_start = 500       # apply Component C from this iteration
+        self.sgdc_bnd_band = 32.0       # only regularize Gaussians within this px of a boundary
         super().__init__(parser, "Optimization Parameters")
 
 def get_combined_args(parser : ArgumentParser):

@@ -148,6 +148,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         else:
             Ll1depth = 0
 
+        # SGDC Component C: cross-boundary scale regularizer
+        bnd_loss_val = 0.0
+        if getattr(opt, "lambda_bnd", 0.0) > 0 and getattr(gaussians, "sgdc_enable", False) \
+                and iteration >= getattr(opt, "sgdc_bnd_start", 500):
+            bnd = gaussians.boundary_loss(
+                viewpoint_cam, visibility_filter, gaussians.semantic_store,
+                band_px=getattr(opt, "sgdc_bnd_band", 32.0))
+            loss = loss + opt.lambda_bnd * bnd
+            bnd_loss_val = bnd.item()
+
         loss.backward()
 
         iter_end.record()
@@ -160,6 +170,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if iteration % 10 == 0:
                 progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "Depth Loss": f"{ema_Ll1depth_for_log:.{7}f}"})
                 progress_bar.update(10)
+                if tb_writer and getattr(opt, "lambda_bnd", 0.0) > 0:
+                    tb_writer.add_scalar('sgdc/boundary_loss', bnd_loss_val, iteration)
             if iteration == opt.iterations:
                 progress_bar.close()
 
