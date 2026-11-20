@@ -535,6 +535,30 @@ class GaussianModel:
         return out
 
     @staticmethod
+    def _pad_placement(placement, n):
+        """Pad a placement frame (length P_old) with invalid rows to length n.
+
+        Split runs AFTER clone (which appended rows at the tail), so a frame
+        built on the pre-densification population must be padded to the current
+        length -- a freshly created clone child is never placed by this frame.
+        Duck-types ``placement`` (``n_hat``/``valid``/``tangent``) so this file
+        does not import :mod:`sgdense.placement`.
+        """
+        if placement is None or placement.n_hat.shape[0] == n:
+            return placement
+        p = int(placement.n_hat.shape[0])
+        if p > n:
+            raise RuntimeError(
+                f"_pad_placement: frame len {p} > population {n}; stale frame")
+        dev, dt = placement.n_hat.device, placement.n_hat.dtype
+        n_hat = torch.cat([placement.n_hat, torch.zeros((n - p, 3), device=dev, dtype=dt)], 0)
+        valid = torch.cat([placement.valid, torch.zeros((n - p,), device=dev, dtype=torch.bool)], 0)
+        scale = getattr(placement, "scale", None)
+        if scale is not None:
+            scale = torch.cat([scale, torch.ones((n - p,), device=dev, dtype=scale.dtype)], 0)
+        return type(placement)(n_hat, valid, scale)
+
+    @staticmethod
     def _remap_after_split(mask, prune_filter):
         """Prune keeps the appended children (their slots are False), so ~prune_filter
         is already the full new ordering (survivors + children). No re-append."""
@@ -574,9 +598,51 @@ class GaussianModel:
             return new_thresh[gauss_class_ids]
         return basic_thresh
 
+    def _place_children(self, selected_pts_mask, N, cfg, placement):
+        """Deterministic boundary-normal placement of N children per parent.
+
+        Valid rows land at ``x +/- rho * scale * sigma_major * n_hat`` (symmetric
+        about the parent); rows with no usable direction fall back to vanilla
+        random ``N(0, Sigma)``. ``n_hat`` is the effective unit direction from
+        :func:`sgdense.placement.local_frames` / :func:`tangent_frames` (the
+        caller resolves the tangent/random fallback and the feasibility retraction
+        into ``n_hat``, ``valid`` and ``scale``). Shared by split (parents pruned)
+        and stage-2 directional clone (parents kept).
+
+        Returns ``new_xyz`` [N*K, 3] in the tiled order that ``repeat(N, 1)``
+        produces (index ``c*K + k``), matching the inherited attributes.
+        """
+        n = int(self.get_xyz.shape[0])
+        placement = self._pad_placement(placement, n)
+        K = int(selected_pts_mask.sum())
+        base = self.get_xyz[selected_pts_mask]                       # [K,3]
+        if K == 0:
+            return base.repeat(N, 1)
+
+        rho = float(getattr(cfg, "placement_rho", 0.5)) if cfg is not None else 0.5
+        dirs = placement.n_hat[selected_pts_mask]                    # [K,3]
+        valid = placement.valid[selected_pts_mask]                   # [K]
+        scale = placement.scale[selected_pts_mask]                   # [K]
+
+        maj = self.get_scaling[selected_pts_mask].max(dim=1).values  # [K]
+        delta = (rho * scale * maj)[:, None] * dirs                 # [K,3]
+        fracs = (torch.linspace(-1.0, 1.0, N, device="cuda") if N > 1
+                 else torch.zeros(1, device="cuda"))                # [N]
+        offs = fracs[None, :, None] * delta[:, None, :]             # [K,N,3]
+        placed = base.repeat(N, 1) + offs.permute(1, 0, 2).reshape(N * K, 3)
+
+        valid_tiled = valid.repeat(N)                               # [N*K], index c*K+k
+        if bool(valid_tiled.all()):
+            return placed
+        stds = self.get_scaling[selected_pts_mask].repeat(N, 1)
+        rand = torch.normal(mean=torch.zeros_like(stds), std=stds)
+        rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N, 1, 1)
+        rand_xyz = torch.bmm(rots, rand.unsqueeze(-1)).squeeze(-1) + base.repeat(N, 1)
+        return torch.where(valid_tiled[:, None], placed, rand_xyz)
+
     def densify_and_split(self, grads, grad_threshold, scene_extent, N=2, dense_weight=1,
                           sel_mask=None, cfg=None, s_tilde=None, freeze_mask=None,
-                          regime="all"):
+                          regime="all", placement=None):
         n_init_points = self.get_xyz.shape[0]
         # Extract points that satisfy the gradient condition
         padded_grad = torch.zeros((n_init_points), device="cuda")
@@ -595,14 +661,21 @@ class GaussianModel:
             selected_pts_mask = torch.logical_and(
                 selected_pts_mask, ~self._pad_mask(freeze_mask, n_init_points))
 
-        # Vanilla split placement: children sampled from N(0, Sigma) in the
-        # parent's local frame (standard 3DGS).
-        stds = self.get_scaling[selected_pts_mask].repeat(N,1)
-        means =torch.zeros((stds.size(0), 3),device="cuda")
-        samples = torch.normal(mean=means, std=stds)
+        # Split placement. Default (placement is None) is the vanilla random
+        # N(0, Sigma) sampling in the parent's local frame -- behaviourally
+        # identical to 3DGS. When a placement frame is supplied (docs/08),
+        # children land deterministically on the segmentation boundary normal
+        # (with a per-row random fallback inside _place_split_children).
+        base_xyz = self.get_xyz[selected_pts_mask]
+        if placement is None:
+            stds = self.get_scaling[selected_pts_mask].repeat(N,1)
+            means =torch.zeros((stds.size(0), 3),device="cuda")
+            samples = torch.normal(mean=means, std=stds)
 
-        rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N,1,1)
-        new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[selected_pts_mask].repeat(N, 1)
+            rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N,1,1)
+            new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + base_xyz.repeat(N, 1)
+        else:
+            new_xyz = self._place_children(selected_pts_mask, N, cfg, placement)
         new_scaling = self.scaling_inverse_activation(self.get_scaling[selected_pts_mask].repeat(N,1) / (0.8*N))
         new_rotation = self._rotation[selected_pts_mask].repeat(N,1)
         new_features_dc = self._features_dc[selected_pts_mask].repeat(N,1,1)
@@ -628,7 +701,7 @@ class GaussianModel:
 
     def densify_and_clone(self, grads, grad_threshold, scene_extent, dense_weight=1,
                           sel_mask=None, cfg=None, s_tilde=None, freeze_mask=None,
-                          regime="all"):
+                          regime="all", placement=None):
         # Extract points that satisfy the gradient condition
         n_init_points = self.get_xyz.shape[0]
 
@@ -646,6 +719,30 @@ class GaussianModel:
         if freeze_mask is not None:                                              # FREEZE: never clone
             selected_pts_mask = torch.logical_and(
                 selected_pts_mask, ~self._pad_mask(freeze_mask, n_init_points))
+
+        directional = (placement is not None and cfg is not None
+                       and bool(getattr(cfg, "placement_directional_clone", False)))
+        if directional:
+            # Stage 2 (docs/08 section 5): N placed children per parent, parent
+            # kept. Direction/validity resolved by the caller (n_hat or tangent).
+            N = int(getattr(cfg, "placement_clone_children", 2))
+            new_xyz = self._place_children(selected_pts_mask, N, cfg, placement)
+            new_features_dc = self._features_dc[selected_pts_mask].repeat(N, 1, 1)
+            new_features_rest = self._features_rest[selected_pts_mask].repeat(N, 1, 1)
+            new_seg_encoding = self._segmentation_encoding[selected_pts_mask].repeat(N, 1)
+            new_seg_hist = (self.seg_hist[selected_pts_mask].repeat(N, 1)
+                            * self.seg_hist_inherit_discount)
+            new_opacities = self._opacity[selected_pts_mask].repeat(N, 1)
+            new_scaling = self._scaling[selected_pts_mask].repeat(N, 1)
+            new_rotation = self._rotation[selected_pts_mask].repeat(N, 1)
+            new_tmp_radii = self.tmp_radii[selected_pts_mask].repeat(N)
+
+            self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_seg_encoding, new_tmp_radii, new_seg_hist)
+
+            if self._densify_tracker is not None:
+                self._densify_tracker.on_clone(selected_pts_mask, padded_grad, new_xyz,
+                                               N=N, regime=regime)
+            return
 
         new_xyz = self._xyz[selected_pts_mask]
         new_features_dc = self._features_dc[selected_pts_mask]
@@ -667,7 +764,7 @@ class GaussianModel:
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, radii,
                           cfg=None, s_tilde=None,
                           interior_mask=None, boundary_mask=None, floater_mask=None, other_mask=None,
-                          densify_weight=None):
+                          densify_weight=None, placement=None, clone_placement=None):
         cfg = cfg if cfg is not None else _DEFAULT_CFG
         self.tmp_radii = radii                       # set BEFORE prune_points (it prunes tmp_radii)
 
@@ -687,6 +784,17 @@ class GaussianModel:
             boundary_mask = boundary_mask[keep] if boundary_mask is not None else None
             other_mask = other_mask[keep] if other_mask is not None else None
             densify_weight = densify_weight[keep] if densify_weight is not None else None
+            if placement is not None:
+                # keep the frame aligned with the survivors after the floater prune
+                scale = getattr(placement, "scale", None)
+                placement = type(placement)(
+                    placement.n_hat[keep], placement.valid[keep],
+                    scale[keep] if scale is not None else None)
+            if clone_placement is not None:
+                cscale = getattr(clone_placement, "scale", None)
+                clone_placement = type(clone_placement)(
+                    clone_placement.n_hat[keep], clone_placement.valid[keep],
+                    cscale[keep] if cscale is not None else None)
         elif floater_mask is not None and cfg.floater_action == "freeze":
             freeze_mask = floater_mask
 
@@ -700,6 +808,10 @@ class GaussianModel:
             grads = grads * densify_weight.reshape(-1, 1).to(grads.device, grads.dtype)
 
         if cfg.position_based_thresh:
+            if placement is not None or clone_placement is not None:
+                raise NotImplementedError(
+                    "segmentation placement is not supported together with "
+                    "position_based_thresh routing yet (docs/08 section 6.6)")
             regimes = {                                  # name -> (mask, scaling_threshold)
                 "interior": (interior_mask, cfg.interior_weight),
                 "boundary": (boundary_mask, cfg.boundary_weight),
@@ -734,10 +846,10 @@ class GaussianModel:
         else:
             self.densify_and_clone(grads, max_grad, extent,
                                    dense_weight=1, cfg=cfg, s_tilde=s_tilde,
-                                   freeze_mask=freeze_mask)
+                                   freeze_mask=freeze_mask, placement=clone_placement)
             prune_filter, n_children = self.densify_and_split(
                 grads, max_grad, extent, dense_weight=1, cfg=cfg, s_tilde=s_tilde,
-                freeze_mask=freeze_mask)
+                freeze_mask=freeze_mask, placement=placement)
 
         prune_mask = (self.get_opacity < min_opacity).squeeze()
         if max_screen_size:
