@@ -626,8 +626,18 @@ def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations,
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
                 save_decoder_checkpoint(decoder, decoder_optimizer, iteration, scene.model_path + f"/decoder{iteration}.pth")
 
+            # Profiling-only diagnostics: visible-Gaussian count + mean screen-space
+            # radius. These reveal whether the render/backward cost is P-bound (many
+            # small splats) or pair-bound (few large, heavily-overlapping splats).
+            extra_meta = {}
+            if profiler.enabled:
+                vis = radii > 0
+                n_vis = int(vis.sum())
+                extra_meta["n_visible"] = n_vis
+                extra_meta["radius_px_mean"] = float(radii[vis].float().mean()) if n_vis else 0.0
             profiler.end_iteration(densify=densify_ran,
-                                   warmup=iteration <= opt.seg_warmup_iters)
+                                   warmup=iteration <= opt.seg_warmup_iters,
+                                   **extra_meta)
 
     # Persist the densification policy for reproducibility / downstream scripts.
     with open(os.path.join(dataset.model_path, "experiment_config.json"), "w") as f:
