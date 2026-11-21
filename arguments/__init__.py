@@ -139,12 +139,19 @@ class SGDenseParams(ParamGroup):
         # On (default) = the clone/split trigger accumulates the PHOTOMETRIC
         # (+ depth) position gradient only, decoupling densification from the
         # segmentation loss so the segmentation cross-entropy cannot inflate the
-        # trigger; the full loss still drives the optimiser. Costs an extra
-        # rasteriser backward pass during the densification window.
+        # trigger; the full loss still drives the optimiser. The photometric-only
+        # gradient is emitted by the same rasteriser backward pass (no extra pass).
         # Pass --no_densify_photo_grad_only to restore upstream behaviour (the
         # gradient of the *total* loss w.r.t. the screen-space means drives the
         # trigger, so every loss term including L_seg can inflate it).
         self.densify_photo_grad_only = True
+        # --- seg-render interval (perf; training-dynamics tradeoff) ---
+        # Render the segmentation pass (32-channel compositing, votes, decoder,
+        # L_seg) only every K iterations. K=1 (default) = every iteration (current
+        # behaviour); K>1 makes non-active iterations cost ~vanilla, at the price
+        # of fewer decoder updates / seg->geometry gradients and slower histogram
+        # evidence growth (see docs). A performance lever, not a free win: ablate.
+        self.seg_render_interval = 1
         # --- photo-weight ramp (seg-warmup coupling) ---
         # On (default) = the photometric term is suppressed to 0 during the seg
         # warmup and ramps back to full weight over ~10x the warmup length. The

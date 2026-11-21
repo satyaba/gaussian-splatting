@@ -154,6 +154,14 @@ def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations,
         print("[SGDense] densification-gradient decoupling ON: clone/split trigger "
               "uses the photometric(+depth) position gradient only")
 
+    # Seg-render interval (perf): render the segmentation pass only every K
+    # iterations. K=1 reproduces current behaviour. K>1 is a training-dynamics
+    # tradeoff (fewer decoder updates / seg->geometry gradients) — ablate it.
+    seg_render_interval = max(1, int(getattr(sgdense, "seg_render_interval", 1)))
+    if seg_render_interval > 1:
+        print(f"[SGDense] seg-render interval ON: segmentation rendered every "
+              f"{seg_render_interval} iterations (others ~vanilla)")
+
     # The rasterizer's channel count is a compile-time constant; keep Python-side
     # config honest about it.
     assert dataset.seg_encoding_dim == 32, "seg_encoding_dim must match NUM_SEG_CHANNELS in cuda_rasterizer/config.h (rebuild required to change)"
@@ -258,8 +266,12 @@ def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations,
 
         bg = torch.rand((3), device="cuda") if opt.random_background else background
 
+        # Seg-render gate: only active iterations render/train segmentation.
+        do_seg = (dataset.num_segmentation_classes > 0
+                  and (iteration % seg_render_interval == 0))
+
         with profiler.phase("render"):
-            render_pkg = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE, num_segmentation_classes=dataset.num_segmentation_classes)
+            render_pkg = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE, num_segmentation_classes=dataset.num_segmentation_classes, do_seg=do_seg)
             image, viewspace_point_tensor, visibility_filter, radii, seg_votes = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"], render_pkg["seg_votes"]
 
         with profiler.phase("loss"):
@@ -305,45 +317,51 @@ def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations,
             else:
                 Ll1depth = 0
 
-            # Photometric(+depth) objective *before* the segmentation term. When
-            # densify_photo_only is on, this sub-graph's position gradient is what
-            # feeds the clone/split trigger (see the backward phase below).
-            loss_no_seg = loss
+            # The decoupled clone/split trigger uses the photometric-only position
+            # gradient emitted by the rasterizer's backward (render_pkg
+            # ["dmean2D_photo"]), so no separate photo-loss sub-graph is needed here.
 
             # Segmentation decode — AFTER rasterization, in the training loop (the
             # decoder compares decoded outputs across cameras for L_consist later).
-            rendered_seg = render_pkg["rendered_seg"]                       # [NUM_SEG_CHANNELS, H, W]
-            seg_logits = decoder(rendered_seg.permute(1, 2, 0))             # [H, W, num_segmentation_classes]
+            # Only on seg-render iterations (interval K); off-iterations skip the
+            # decoder entirely so the loss has no seg term (backward then skips the
+            # seg channels too).
             gt_segmentation = getattr(viewpoint_cam, "gt_segmentation", None)
             Ll1seg = 0.0
             seg_ce_raw = None
-            if gt_segmentation is not None:
-                seg_ce_raw = torch.nn.functional.cross_entropy(
-                    seg_logits.reshape(-1, dataset.num_segmentation_classes),
-                    gt_segmentation.cuda().reshape(-1).long(),
-                    ignore_index=-1)  # void rule v1: ignore pixels labeled 255
-                L_seg = opt.lambda_seg * seg_ce_raw
-                loss = loss + L_seg
-                Ll1seg = L_seg.item()
-            for param_group in decoder_optimizer.param_groups:
-                param_group['lr'] = get_decoder_lr(iteration)
+            if do_seg:
+                rendered_seg = render_pkg["rendered_seg"]                   # [NUM_SEG_CHANNELS, H, W]
+                seg_logits = decoder(rendered_seg.permute(1, 2, 0))         # [H, W, num_segmentation_classes]
+                if gt_segmentation is not None:
+                    seg_ce_raw = torch.nn.functional.cross_entropy(
+                        seg_logits.reshape(-1, dataset.num_segmentation_classes),
+                        gt_segmentation.cuda().reshape(-1).long(),
+                        ignore_index=-1)  # void rule v1: ignore pixels labeled 255
+                    L_seg = opt.lambda_seg * seg_ce_raw
+                    loss = loss + L_seg
+                    Ll1seg = L_seg.item()
+                for param_group in decoder_optimizer.param_groups:
+                    param_group['lr'] = get_decoder_lr(iteration)
 
         with profiler.phase("backward"):
-            # Densification-gradient decoupling (Option A): when enabled, extract
-            # the photometric(+depth) gradient w.r.t. the screen-space means with a
-            # non-accumulating autograd.grad pass, so the clone/split trigger can be
-            # fed that instead of the total (photo + seg) gradient. autograd.grad
-            # does NOT write .grad and retain_graph keeps the graph alive for the
-            # full backward below, so parameter updates are unchanged.
-            densify_point_grad = None
-            if (densify_photo_only and loss_no_seg.requires_grad
-                    and gt_segmentation is not None
-                    and iteration < opt.densify_until_iter
-                    and iteration > opt.seg_warmup_iters):
-                densify_point_grad = torch.autograd.grad(
-                    loss_no_seg, viewspace_point_tensor,
-                    retain_graph=True, allow_unused=True)[0]
+            # Densification-gradient decoupling (Option A): the photometric(+depth)-
+            # only gradient w.r.t. the screen-space means is produced by THIS SAME
+            # backward — the rasterizer writes it into render_pkg["dmean2D_photo"]
+            # (see cuda_rasterizer/backward.cu). This replaces the previous second
+            # autograd.grad traversal, which ran for ~23k iterations.
             loss.backward()
+
+        # Read the decoupled trigger gradient emitted by that backward (only valid
+        # after loss.backward()). It is photo-only, so the segmentation CE cannot
+        # inflate the clone/split trigger; the optimizer still gets the full
+        # photo+seg gradient above.
+        densify_point_grad = None
+        if (densify_photo_only and gt_segmentation is not None
+                and iteration < opt.densify_until_iter
+                and iteration > opt.seg_warmup_iters):
+            photo_grad = render_pkg.get("dmean2D_photo")
+            if photo_grad is not None and photo_grad.numel() > 0:
+                densify_point_grad = photo_grad
 
         iter_end.record()
 
