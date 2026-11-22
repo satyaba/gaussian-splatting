@@ -28,12 +28,25 @@ def _install(repo):
     subprocess.run("git submodule update --init --recursive submodules/diff-gaussian-rasterization",
                    shell=True, cwd=repo, check=True)
     rast = repo + "/submodules/diff-gaussian-rasterization"
+    # CUDA 12+ / newer libstdc++ no longer transitively include <cstdint>, so the
+    # stock headers fail with `std::uintptr_t not found`. Same patch the harness does.
+    for rel in ("cuda_rasterizer/rasterizer_impl.h",
+                "cuda_rasterizer/forward.cu",
+                "cuda_rasterizer/backward.cu"):
+        f = Path(rast) / rel
+        if f.exists():
+            txt = f.read_text()
+            if "#include <cstdint>" not in txt:
+                f.write_text("#include <cstdint>\n" + txt)
     subprocess.run("rm -rf build dist *.egg-info", shell=True, cwd=rast)
     subprocess.run("pip uninstall -y diff-gaussian-rasterization", shell=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    subprocess.run("pip install . --no-build-isolation --no-cache-dir --force-reinstall",
-                   shell=True, cwd=rast, check=True,
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    r = subprocess.run("pip install . --no-build-isolation --no-cache-dir --force-reinstall",
+                       shell=True, cwd=rast, capture_output=True, text=True)
+    if r.returncode != 0:
+        print(f"[install] {repo} build failed; tail:\n" +
+              "\n".join(((r.stdout or "") + (r.stderr or "")).splitlines()[-30:]))
+        raise SystemExit(1)
 
 
 def _profile(tag, repo, extra):
