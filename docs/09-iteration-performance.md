@@ -73,7 +73,22 @@ blindly.
 - Buffer is zeroed per render (fresh `torch.zeros`), so `atomicAdd` accumulation
   is clean. Empty buffer ⇒ null pointer ⇒ kernel skips (eval/GUI paths).
 
-## 4. Not done yet (candidates)
+## 4. Follow-up: backward register/occupancy (measured)
+
+A/B at matched populations (44k vs 329k → `--no_photo_weight_ramp` to reach
+262k vs 325k) put ~3× of the gap in `backward`. `-Xptxas -v` (sm_75) showed the
+cause: the backward `renderCUDA<3>` used **100 registers** vs the stock **64**, so
+it ran at **2 blocks/SM (50% occupancy)** vs 4 blocks (100%). No spills — purely an
+occupancy cap. (The forward was 64 vs 33 registers, but both are thread-capped at
+4 blocks, so it was unaffected.)
+
+Fix (this branch): stop holding `dL_pixel_seg[32]` live across the j-loop — read
+`a[ch] = dL_pixels_seg[ch*H*W + pix_id]` from global inside the seg loop (per-pixel
+constant, L1-cached) — and pin `__launch_bounds__(BLOCK_X*BLOCK_Y, 4)` so ptxas
+targets ≤64 registers. Verify register count/spills after rebuild with
+`NVCC_PREPEND_FLAGS="-Xptxas -v"`.
+
+## 5. Not done yet (candidates)
 
 - Warp/block reduction of the `dL_dseg_encoding` atomics (all threads in a tile
   write the same `global_id`); hardware may already aggregate same-address
@@ -84,7 +99,7 @@ blindly.
 - `template<bool DO_SEG>` forward instantiation so skipped iterations also drop
   the `S[32]` register footprint, not just the executed work.
 
-## 5. Build & measure
+## 6. Build & measure
 
 ```
 pip install -e submodules/diff-gaussian-rasterization --break-system-packages -v
