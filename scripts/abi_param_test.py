@@ -52,12 +52,12 @@ def patch_dummy_params():
     txt = BW.read_text()
     # (1) extend the kernel signature with 4 unused pointer params (last param is
     #     `float* __restrict__ dL_dinvdepths)`)
-    txt, n1 = re.subn(r'float\*\s+__restrict__\s+dL_dinvdepths\)',
-                      'float* __restrict__ dL_dinvdepths,\n'
+    txt, n1 = re.subn(r'(float\*\s+__restrict__\s+dL_dinvdepths)(\s*)\)',
+                      r'\1,\n'
                       '\tconst float* __restrict__ _d0,\n'
                       '\tconst float* __restrict__ _d1,\n'
                       '\tfloat3* __restrict__ _d2,\n'
-                      '\tfloat* __restrict__ _d3)',
+                      '\tfloat* __restrict__ _d3\2)',
                       txt, count=1)
     # (2) pass nulls at the kernel-launch site
     txt, n2 = re.subn(r'(dL_dinvdepths)(\s*\)\s*;)',
