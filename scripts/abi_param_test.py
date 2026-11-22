@@ -48,21 +48,27 @@ def build():
 
 
 def patch_dummy_params():
+    import re
     txt = BW.read_text()
-    sig_old = ("\tfloat4* __restrict__ dL_dconic2D,\n"
-               "\tfloat* __restrict__ dL_dopacity,\n"
-               "\tfloat* __restrict__ dL_dcolors)")
-    sig_new = ("\tfloat4* __restrict__ dL_dconic2D,\n"
-               "\tfloat* __restrict__ dL_dopacity,\n"
-               "\tfloat* __restrict__ dL_dcolors,\n"
-               "\tconst float* __restrict__ _dummy0,\n"
-               "\tconst float* __restrict__ _dummy1,\n"
-               "\tfloat3* __restrict__ _dummy2,\n"
-               "\tfloat* __restrict__ _dummy3)")
-    launch_old = "\t\tdL_dcolors\n\t\t);"
-    launch_new = "\t\tdL_dcolors,\n\t\tnullptr, nullptr, nullptr, nullptr\n\t\t);"
-    assert sig_old in txt and launch_old in txt, "anchors not found"
-    BW.write_text(txt.replace(sig_old, sig_new).replace(launch_old, launch_new))
+    # (1) extend the kernel signature with 4 unused pointer params
+    txt, n1 = re.subn(r'float\*\s+__restrict__\s+dL_dcolors\)',
+                      'float* __restrict__ dL_dcolors,\n'
+                      '\tconst float* __restrict__ _d0,\n'
+                      '\tconst float* __restrict__ _d1,\n'
+                      '\tfloat3* __restrict__ _d2,\n'
+                      '\tfloat* __restrict__ _d3)',
+                      txt, count=1)
+    # (2) pass nulls at the kernel-launch site
+    txt, n2 = re.subn(r'(dL_dcolors)(\s*\)\s*;)',
+                      r'\1,\n\t\tnullptr, nullptr, nullptr, nullptr\2',
+                      txt, count=1)
+    if n1 != 1 or n2 != 1:
+        print("PATCH FAILED: signature=%d launch=%d; nearby lines:" % (n1, n2))
+        for ln in BW.read_text().splitlines():
+            if "dL_dcolors" in ln:
+                print("   ", repr(ln))
+        raise SystemExit(1)
+    BW.write_text(txt)
 
 
 def profile(tag):
