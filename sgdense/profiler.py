@@ -238,7 +238,14 @@ class IterProfiler:
         rec["iter_ms"] = (time.perf_counter() - self._t_iter0) * 1000.0
         if self._cuda and self._ev_iter0 is not None:
             self._ev_iter1.record()
-            rec["iter_gpu_ms"] = self._ev_iter0.elapsed_time(self._ev_iter1)
+            # torch.cuda.Event.elapsed_time requires BOTH events to be complete on
+            # newer PyTorch; sync the stream after recording the end event before
+            # reading it. Guarded so a timing hiccup can never abort training.
+            self._sync()
+            try:
+                rec["iter_gpu_ms"] = self._ev_iter0.elapsed_time(self._ev_iter1)
+            except RuntimeError:
+                rec["iter_gpu_ms"] = None
         measured = sum(rec["phases_ms"].values())
         rec["phase_sum_ms"] = measured
         rec["misc_ms"] = max(0.0, rec["iter_ms"] - measured)

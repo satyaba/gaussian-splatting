@@ -15,7 +15,7 @@ from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianR
 from scene.gaussian_model import GaussianModel
 from utils.sh_utils import eval_sh
 
-def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, separate_sh = False, override_color = None, use_trained_exp=False, num_segmentation_classes : int = -1):
+def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, separate_sh = False, override_color = None, use_trained_exp=False, num_segmentation_classes : int = -1, do_seg : bool = True):
     """
     Render the scene.
 
@@ -36,7 +36,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     # int64 [H, W] on CUDA, -1 = void. An empty tensor signals "no segmentation"
     # for this view; the kernel then receives a null pointer and casts no votes.
     gt_segmentation = getattr(viewpoint_camera, "gt_segmentation", None)
-    if gt_segmentation is None:
+    if gt_segmentation is None or not do_seg:
         gt_segmentation = torch.empty(0, dtype=torch.long, device="cuda")
     else:
         gt_segmentation = gt_segmentation.to(device="cuda", dtype=torch.long).contiguous()
@@ -59,6 +59,16 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     else:
         vote_buffer = torch.empty(0, dtype=torch.float32, device="cuda")
 
+    # Photometric-only 2D-mean gradient buffer [P, 3] for the decoupled
+    # densification trigger (--densify_photo_grad_only). Written in place by the
+    # SAME backward pass, so train.py no longer needs a second autograd.grad call.
+    # Only allocated for training renders (segmentation on); empty => skipped.
+    if num_segmentation_classes > 0 and pc.get_xyz.shape[0] > 0:
+        dL_dmean2D_photo = torch.zeros((pc.get_xyz.shape[0], 3),
+                                       dtype=torch.float32, device="cuda")
+    else:
+        dL_dmean2D_photo = torch.empty(0, dtype=torch.float32, device="cuda")
+
     raster_settings = GaussianRasterizationSettings(
         image_height=int(viewpoint_camera.image_height),
         image_width=int(viewpoint_camera.image_width),
@@ -67,7 +77,9 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         bg=bg_color,
         gt_segmentation=gt_segmentation,
         num_segmentation_classes=num_segmentation_classes,
+        do_seg=do_seg,
         vote_buffer=vote_buffer,
+        dL_dmean2D_photo=dL_dmean2D_photo,
         scale_modifier=scaling_modifier,
         viewmatrix=viewpoint_camera.world_view_transform,
         projmatrix=viewpoint_camera.full_proj_transform,
@@ -161,6 +173,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         "render": rendered_image,
         "rendered_seg": rendered_seg,
         "seg_votes": vote_buffer,
+        "dmean2D_photo": dL_dmean2D_photo,
         "viewspace_points": screenspace_points,
         "visibility_filter" : (radii > 0).nonzero(),
         "radii": radii,

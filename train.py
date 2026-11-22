@@ -13,6 +13,11 @@ import os
 import json
 import numpy as np
 import torch
+try:
+    import torch.profiler  # for optional CUDA-kernel-level profiling (SGDENSE_TORCH_PROFILE)
+    _TORCH_PROFILER_AVAILABLE = True
+except Exception:
+    _TORCH_PROFILER_AVAILABLE = False
 from random import randint
 from utils.loss_utils import l1_loss, ssim
 from gaussian_renderer import render, network_gui
@@ -23,6 +28,8 @@ from scene.segmentation_decoder import SegmentationDecoder, save_decoder_checkpo
 from utils.general_utils import safe_state, get_expon_lr_func
 from sgdense.config import DensificationConfig
 from sgdense.categories import generate_category_masks
+from sgdense.placement import (local_frames, tangent_frames, support_baseline,
+                               feasibility_scales, PlacementFrame)
 from sgdense.profiler import IterProfiler
 import uuid
 from tqdm import tqdm
@@ -79,6 +86,15 @@ def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations,
         knn_m=sgdense.knn_m,
         holdout_frac=sgdense.holdout_frac,
         thin_ratio_div=sgdense.thin_ratio_div,
+        placement_mode=sgdense.placement_mode,
+        placement_rho=sgdense.placement_rho,
+        placement_knn_k=sgdense.placement_knn_k,
+        placement_knn_kmin=sgdense.placement_knn_kmin,
+        placement_use_tangent_fallback=sgdense.placement_use_tangent_fallback,
+        placement_feasibility=sgdense.placement_feasibility,
+        placement_max_retries=sgdense.placement_max_retries,
+        placement_directional_clone=sgdense.placement_directional_clone,
+        placement_clone_children=sgdense.placement_clone_children,
     )
 
     # Per-class texture score for TEXTURE_BASED_THRESH / TEXTURE_BASED_SCALE: load
@@ -143,9 +159,17 @@ def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations,
         print("[SGDense] densification-gradient decoupling ON: clone/split trigger "
               "uses the photometric(+depth) position gradient only")
 
+    # Seg-render interval (perf): render the segmentation pass only every K
+    # iterations. K=1 reproduces current behaviour. K>1 is a training-dynamics
+    # tradeoff (fewer decoder updates / seg->geometry gradients) — ablate it.
+    seg_render_interval = max(1, int(getattr(sgdense, "seg_render_interval", 1)))
+    if seg_render_interval > 1:
+        print(f"[SGDense] seg-render interval ON: segmentation rendered every "
+              f"{seg_render_interval} iterations (others ~vanilla)")
+
     # The rasterizer's channel count is a compile-time constant; keep Python-side
     # config honest about it.
-    assert dataset.seg_encoding_dim == 32, "seg_encoding_dim must match NUM_SEG_CHANNELS in cuda_rasterizer/config.h (rebuild required to change)"
+    assert dataset.seg_encoding_dim == 16, "seg_encoding_dim must match NUM_SEG_CHANNELS in cuda_rasterizer/config.h (rebuild required to change)"
 
     # Segmentation decoder: fully decoupled from GaussianModel — own optimizer,
     # own checkpoint path.
@@ -183,6 +207,13 @@ def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations,
     )
     if profiler.enabled:
         print(f"[SGDense] iteration profiling ON (spec={profiler.spec}) -> {profiler.out_path}")
+
+    # Optional CUDA-kernel-level profiling over the same window. Enable with
+    # SGDENSE_TORCH_PROFILE=1 (requires the phase profiler window too); prints the
+    # top CUDA kernels at the end of the window. Used to locate backward cost that
+    # the synced phase timers cannot attribute (e.g. kernel vs alloc vs sync).
+    _want_tp = _TORCH_PROFILER_AVAILABLE and bool(os.environ.get("SGDENSE_TORCH_PROFILE"))
+    _tp = None
 
     iter_start = torch.cuda.Event(enable_timing = True)
     iter_end = torch.cuda.Event(enable_timing = True)
@@ -247,8 +278,12 @@ def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations,
 
         bg = torch.rand((3), device="cuda") if opt.random_background else background
 
+        # Seg-render gate: only active iterations render/train segmentation.
+        do_seg = (dataset.num_segmentation_classes > 0
+                  and (iteration % seg_render_interval == 0))
+
         with profiler.phase("render"):
-            render_pkg = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE, num_segmentation_classes=dataset.num_segmentation_classes)
+            render_pkg = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE, num_segmentation_classes=dataset.num_segmentation_classes, do_seg=do_seg)
             image, viewspace_point_tensor, visibility_filter, radii, seg_votes = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"], render_pkg["seg_votes"]
 
         with profiler.phase("loss"):
@@ -294,45 +329,55 @@ def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations,
             else:
                 Ll1depth = 0
 
-            # Photometric(+depth) objective *before* the segmentation term. When
-            # densify_photo_only is on, this sub-graph's position gradient is what
-            # feeds the clone/split trigger (see the backward phase below).
-            loss_no_seg = loss
+            # The decoupled clone/split trigger uses the photometric-only position
+            # gradient emitted by the rasterizer's backward (render_pkg
+            # ["dmean2D_photo"]), so no separate photo-loss sub-graph is needed here.
 
             # Segmentation decode — AFTER rasterization, in the training loop (the
             # decoder compares decoded outputs across cameras for L_consist later).
-            rendered_seg = render_pkg["rendered_seg"]                       # [NUM_SEG_CHANNELS, H, W]
-            seg_logits = decoder(rendered_seg.permute(1, 2, 0))             # [H, W, num_segmentation_classes]
+            # Only on seg-render iterations (interval K); off-iterations skip the
+            # decoder entirely so the loss has no seg term (backward then skips the
+            # seg channels too).
             gt_segmentation = getattr(viewpoint_cam, "gt_segmentation", None)
             Ll1seg = 0.0
             seg_ce_raw = None
-            if gt_segmentation is not None:
-                seg_ce_raw = torch.nn.functional.cross_entropy(
-                    seg_logits.reshape(-1, dataset.num_segmentation_classes),
-                    gt_segmentation.cuda().reshape(-1).long(),
-                    ignore_index=-1)  # void rule v1: ignore pixels labeled 255
-                L_seg = opt.lambda_seg * seg_ce_raw
-                loss = loss + L_seg
-                Ll1seg = L_seg.item()
-            for param_group in decoder_optimizer.param_groups:
-                param_group['lr'] = get_decoder_lr(iteration)
+            if do_seg:
+                rendered_seg = render_pkg["rendered_seg"]                   # [NUM_SEG_CHANNELS, H, W]
+                seg_logits = decoder(rendered_seg.permute(1, 2, 0))         # [H, W, num_segmentation_classes]
+                if gt_segmentation is not None:
+                    seg_ce_raw = torch.nn.functional.cross_entropy(
+                        seg_logits.reshape(-1, dataset.num_segmentation_classes),
+                        gt_segmentation.cuda().reshape(-1).long(),
+                        ignore_index=-1)  # void rule v1: ignore pixels labeled 255
+                    L_seg = opt.lambda_seg * seg_ce_raw
+                    loss = loss + L_seg
+                    Ll1seg = L_seg.item()
+                for param_group in decoder_optimizer.param_groups:
+                    param_group['lr'] = get_decoder_lr(iteration)
+
+        if _want_tp and _tp is None and profiler.should_profile(iteration):
+            _tp = torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA])
+            _tp.start()
 
         with profiler.phase("backward"):
-            # Densification-gradient decoupling (Option A): when enabled, extract
-            # the photometric(+depth) gradient w.r.t. the screen-space means with a
-            # non-accumulating autograd.grad pass, so the clone/split trigger can be
-            # fed that instead of the total (photo + seg) gradient. autograd.grad
-            # does NOT write .grad and retain_graph keeps the graph alive for the
-            # full backward below, so parameter updates are unchanged.
-            densify_point_grad = None
-            if (densify_photo_only and loss_no_seg.requires_grad
-                    and gt_segmentation is not None
-                    and iteration < opt.densify_until_iter
-                    and iteration > opt.seg_warmup_iters):
-                densify_point_grad = torch.autograd.grad(
-                    loss_no_seg, viewspace_point_tensor,
-                    retain_graph=True, allow_unused=True)[0]
+            # Densification-gradient decoupling (Option A): the photometric(+depth)-
+            # only gradient w.r.t. the screen-space means is produced by THIS SAME
+            # backward — the rasterizer writes it into render_pkg["dmean2D_photo"]
+            # (see cuda_rasterizer/backward.cu). This replaces the previous second
+            # autograd.grad traversal, which ran for ~23k iterations.
             loss.backward()
+
+        # Read the decoupled trigger gradient emitted by that backward (only valid
+        # after loss.backward()). It is photo-only, so the segmentation CE cannot
+        # inflate the clone/split trigger; the optimizer still gets the full
+        # photo+seg gradient above.
+        densify_point_grad = None
+        if (densify_photo_only and gt_segmentation is not None
+                and iteration < opt.densify_until_iter
+                and iteration > opt.seg_warmup_iters):
+            photo_grad = render_pkg.get("dmean2D_photo")
+            if photo_grad is not None and photo_grad.numel() > 0:
+                densify_point_grad = photo_grad
 
         iter_end.record()
 
@@ -414,7 +459,8 @@ def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations,
                     gauss_xyz = gaussians.get_xyz
 
                     interior_mask = boundary_mask = floaters_mask = other_mask = None
-                    if cfg.lvl1_floaters or cfg.lvl2_floaters or cfg.position_based_thresh:
+                    if (cfg.lvl1_floaters or cfg.lvl2_floaters or cfg.position_based_thresh
+                            or cfg.placement_mode == "boundary_normal"):
                         (unobserved_mask, default_mask, interior_mask, floaters_mask,
                          ambiguous_mask, boundary_mask) = generate_category_masks(
                             opacities.shape[0], top2, S, entropy, gauss_xyz, opacities,
@@ -486,11 +532,81 @@ def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations,
                                   f"at_lo/hi={float((densify_weight <= lo + 1e-6).float().mean()):.3f}/"
                                   f"{float((densify_weight >= hi - 1e-6).float().mean()):.3f}")
 
+                    # --- segmentation-boundary placement frame (docs/08) --------
+                    # Built on the pre-densification population; densify_and_prune
+                    # keeps it aligned across the floater prune (gaussian_model).
+                    placement = None
+                    if cfg.placement_mode == "boundary_normal" and boundary_mask is not None:
+                        P0 = int(gauss_xyz.shape[0])
+                        boundary_t = torch.tensor(boundary_mask, device='cuda')
+                        n_hat, valid, _nsurf, tangent = local_frames(
+                            gauss_xyz, gaussians.seg_hist, boundary_t,
+                            K=cfg.placement_knn_k, Kmin=cfg.placement_knn_kmin,
+                            k_m=cfg.knn_m, opacity=opacities,
+                            obs_evidence=opt.seg_hist_min_evidence,
+                            grid_target=cfg.grid_target)
+                        if cfg.placement_use_tangent_fallback:
+                            tan_ok = tangent.norm(dim=1) > 0
+                            replace = (~valid) & tan_ok
+                            n_hat = torch.where(replace[:, None], tangent, n_hat)
+                            valid = valid | tan_ok
+                        scale = torch.ones(P0, device='cuda')
+                        if cfg.placement_feasibility and interior_mask is not None:
+                            interior_t = torch.tensor(interior_mask, device='cuda')
+                            ref_xyz = gauss_xyz[interior_t]
+                            if ref_xyz.shape[0] > 0:
+                                h_sup, thr_r, thr_h = support_baseline(
+                                    ref_xyz, K=cfg.knn_k, Kmin=cfg.knn_kmin, k_m=cfg.knn_m,
+                                    holdout_frac=cfg.holdout_frac,
+                                    thin_ratio_div=cfg.thin_ratio_div,
+                                    grid_target=cfg.grid_target, seed=0)
+                                if np.isfinite(thr_r) and np.isfinite(thr_h):
+                                    maj = gaussians.get_scaling.max(dim=1).values.detach()
+                                    keep, scale = feasibility_scales(
+                                        gauss_xyz, n_hat, maj, rho=cfg.placement_rho,
+                                        ref_xyz=ref_xyz, h=h_sup,
+                                        thresh_reach=thr_r, thresh_height=thr_h,
+                                        K=cfg.knn_k, Kmin=cfg.knn_kmin, k_m=cfg.knn_m,
+                                        max_retries=cfg.placement_max_retries)
+                                    valid = valid & keep
+                        placement = PlacementFrame(n_hat=n_hat, valid=valid, scale=scale)
+                        if tb_writer:
+                            tb_writer.add_scalar("placement/valid_frac",
+                                                 float(valid.float().mean()), iteration)
+                            tb_writer.add_scalar("placement/scale_mean",
+                                                 float(scale.mean()), iteration)
+
+                    # --- stage 2: directional clone frame (docs/08 section 5) ----
+                    # clone is the interior action, so the direction is n_hat where
+                    # a class boundary exists, else the (cheap, histogram-free)
+                    # in-plane surface tangent.
+                    clone_placement = None
+                    if cfg.placement_directional_clone:
+                        P0 = int(gauss_xyz.shape[0])
+                        obs = gaussians.seg_hist.sum(dim=1) > opt.seg_hist_min_evidence
+                        tan_all, tan_ok = tangent_frames(
+                            gauss_xyz, obs, K=cfg.placement_knn_k,
+                            Kmin=cfg.placement_knn_kmin, k_m=cfg.knn_m,
+                            grid_target=cfg.grid_target)
+                        if placement is not None:
+                            cdirs = torch.where(placement.valid[:, None],
+                                                placement.n_hat, tan_all)
+                            cplaced = placement.valid | tan_ok
+                        else:
+                            cdirs, cplaced = tan_all, tan_ok
+                        clone_placement = PlacementFrame(
+                            n_hat=cdirs, valid=cplaced,
+                            scale=torch.ones(P0, device='cuda'))
+                        if tb_writer:
+                            tb_writer.add_scalar("placement/clone_placed_frac",
+                                                 float(cplaced.float().mean()), iteration)
+
                     gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent,
                                                 size_threshold, radii, cfg=cfg, s_tilde=s_tilde,
                                                 interior_mask=interior_mask_t, boundary_mask=boundary_mask_t,
                                                 floater_mask=floaters_mask_t, other_mask=other_mask_t,
-                                                densify_weight=densify_weight)
+                                                densify_weight=densify_weight, placement=placement,
+                                                clone_placement=clone_placement)
                     profiler.stop("densify")
 
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
@@ -526,8 +642,25 @@ def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations,
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
                 save_decoder_checkpoint(decoder, decoder_optimizer, iteration, scene.model_path + f"/decoder{iteration}.pth")
 
+            # Profiling-only diagnostics: visible-Gaussian count + mean screen-space
+            # radius. These reveal whether the render/backward cost is P-bound (many
+            # small splats) or pair-bound (few large, heavily-overlapping splats).
+            extra_meta = {}
+            if profiler.enabled:
+                vis = radii > 0
+                n_vis = int(vis.sum())
+                extra_meta["n_visible"] = n_vis
+                extra_meta["radius_px_mean"] = float(radii[vis].float().mean()) if n_vis else 0.0
             profiler.end_iteration(densify=densify_ran,
-                                   warmup=iteration <= opt.seg_warmup_iters)
+                                   warmup=iteration <= opt.seg_warmup_iters,
+                                   **extra_meta)
+
+    if _tp is not None:
+        _tp.stop()
+        print("\n[torch.profiler] top CUDA kernels over the window:\n"
+              + _tp.key_averages().table(sort_by="cuda_time_total", row_limit=30),
+              flush=True)
+        _tp = None
 
     # Persist the densification policy for reproducibility / downstream scripts.
     with open(os.path.join(dataset.model_path, "experiment_config.json"), "w") as f:
@@ -635,6 +768,12 @@ if __name__ == "__main__":
     parser.add_argument('--no_photo_weight_ramp', action='store_false', dest='photo_weight_ramp')
     parser.add_argument('--no_seg_uncertainty_thresh', action='store_false',
                         dest='seg_uncertainty_thresh')
+    parser.add_argument('--no_placement_use_tangent_fallback', action='store_false',
+                        dest='placement_use_tangent_fallback')
+    parser.add_argument('--no_placement_feasibility', action='store_false',
+                        dest='placement_feasibility')
+    parser.add_argument('--no_placement_directional_clone', action='store_false',
+                        dest='placement_directional_clone')
     parser.add_argument('--ip', type=str, default="127.0.0.1")
     parser.add_argument('--port', type=int, default=6009)
     parser.add_argument('--debug_from', type=int, default=-1)

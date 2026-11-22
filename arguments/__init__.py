@@ -56,7 +56,7 @@ class ModelParams(ParamGroup):
         self.train_test_exp = False
         self.data_device = "cuda"
         self.eval = False
-        self.seg_encoding_dim = 32
+        self.seg_encoding_dim = 16
         self.num_segmentation_classes = 100  # office_0 ids reach 98 (doc 03 §6.4 — safety-critical)
         self.segmentation_path = ""  # folder of uint8 class-id PNGs (255=void); "" disables L_seg
         super().__init__(parser, "Loading Parameters", sentinel)
@@ -139,12 +139,19 @@ class SGDenseParams(ParamGroup):
         # On (default) = the clone/split trigger accumulates the PHOTOMETRIC
         # (+ depth) position gradient only, decoupling densification from the
         # segmentation loss so the segmentation cross-entropy cannot inflate the
-        # trigger; the full loss still drives the optimiser. Costs an extra
-        # rasteriser backward pass during the densification window.
+        # trigger; the full loss still drives the optimiser. The photometric-only
+        # gradient is emitted by the same rasteriser backward pass (no extra pass).
         # Pass --no_densify_photo_grad_only to restore upstream behaviour (the
         # gradient of the *total* loss w.r.t. the screen-space means drives the
         # trigger, so every loss term including L_seg can inflate it).
         self.densify_photo_grad_only = True
+        # --- seg-render interval (perf; training-dynamics tradeoff) ---
+        # Render the segmentation pass (32-channel compositing, votes, decoder,
+        # L_seg) only every K iterations. K=1 (default) = every iteration (current
+        # behaviour); K>1 makes non-active iterations cost ~vanilla, at the price
+        # of fewer decoder updates / seg->geometry gradients and slower histogram
+        # evidence growth (see docs). A performance lever, not a free win: ablate.
+        self.seg_render_interval = 1
         # --- photo-weight ramp (seg-warmup coupling) ---
         # On (default) = the photometric term is suppressed to 0 during the seg
         # warmup and ramps back to full weight over ~10x the warmup length. The
@@ -191,6 +198,23 @@ class SGDenseParams(ParamGroup):
         self.knn_m = 32
         self.holdout_frac = 0.10
         self.thin_ratio_div = 3.0
+        # --- segmentation-boundary placement (docs/08) ---
+        # All inert by default: 'random' reproduces vanilla N(0, Sigma) split
+        # placement. 'boundary_normal' places split children along the local
+        # class-boundary normal derived from the persisted histogram.
+        self.placement_mode = "random"        # 'random' | 'boundary_normal'
+        self.placement_rho = 0.5
+        self.placement_knn_k = 12
+        self.placement_knn_kmin = 6
+        self.placement_use_tangent_fallback = True
+        self.placement_feasibility = True
+        self.placement_max_retries = 2
+        # --- stage 2: directional clone (docs/08 section 5) ---
+        # When on, clone appends placement_clone_children placed children instead
+        # of a single coincident duplicate; direction = n_hat (boundary) else the
+        # in-plane surface tangent. Default off.
+        self.placement_directional_clone = False
+        self.placement_clone_children = 2
         # --- texture-frequency solver (TEXTURE_BASED_THRESH) ---
         self.tex_erode = 3
         self.tex_min_px = 500
