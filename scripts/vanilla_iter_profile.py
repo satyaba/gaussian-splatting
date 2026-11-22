@@ -69,14 +69,16 @@ _prof = IterProfiler(os.environ.get("SGDENSE_PROFILE_ITERS"), out_path=_out,
                      method="vanilla_3dgs")
 
 # Per-iteration scratch state shared across the patched functions.
-_state = {"iter": None, "n": 0, "densify": False}
+_state = {"iter": None, "n": 0, "densify": False, "n_visible": 0, "radius_px_mean": 0.0}
 
 
 def _finish_previous():
     """Finalise the iteration opened by the previous update_learning_rate call."""
     if _state["iter"] is None:
         return
-    _prof.end_iteration(densify=_state["densify"], n_gaussians=_state["n"])
+    _prof.end_iteration(densify=_state["densify"], n_gaussians=_state["n"],
+                        n_visible=_state["n_visible"],
+                        radius_px_mean=_state["radius_px_mean"])
 
 
 def _install():
@@ -99,7 +101,18 @@ def _install():
 
     def render(*a, **k):
         with _prof.phase("render"):
-            return _render(*a, **k)
+            out = _render(*a, **k)
+        # Splat-size diagnostics (parity with the SGDense profiler meta): visible
+        # count + mean screen-space radius, so the A/B compares pair workload too.
+        try:
+            r = out["radii"]
+            vis = r > 0
+            nv = int(vis.sum())
+            _state["n_visible"] = nv
+            _state["radius_px_mean"] = float(r[vis].float().mean()) if nv else 0.0
+        except Exception:
+            pass
+        return out
 
     def l1_loss(*a, **k):
         with _prof.phase("loss"):
@@ -133,6 +146,8 @@ def _install():
         _state["iter"] = iteration
         _state["n"] = int(self.get_xyz.shape[0])
         _state["densify"] = False
+        _state["n_visible"] = 0
+        _state["radius_px_mean"] = 0.0
         _prof.begin_iteration(iteration, n_gaussians=_state["n"])
         return _update_lr(self, iteration)
 
