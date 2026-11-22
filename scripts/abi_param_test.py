@@ -50,22 +50,23 @@ def build():
 def patch_dummy_params():
     import re
     txt = BW.read_text()
-    # (1) extend the kernel signature with 4 unused pointer params
-    txt, n1 = re.subn(r'float\*\s+__restrict__\s+dL_dcolors\)',
-                      'float* __restrict__ dL_dcolors,\n'
+    # (1) extend the kernel signature with 4 unused pointer params (last param is
+    #     `float* __restrict__ dL_dinvdepths)`)
+    txt, n1 = re.subn(r'float\*\s+__restrict__\s+dL_dinvdepths\)',
+                      'float* __restrict__ dL_dinvdepths,\n'
                       '\tconst float* __restrict__ _d0,\n'
                       '\tconst float* __restrict__ _d1,\n'
                       '\tfloat3* __restrict__ _d2,\n'
                       '\tfloat* __restrict__ _d3)',
                       txt, count=1)
     # (2) pass nulls at the kernel-launch site
-    txt, n2 = re.subn(r'(dL_dcolors)(\s*\)\s*;)',
+    txt, n2 = re.subn(r'(dL_dinvdepths)(\s*\)\s*;)',
                       r'\1,\n\t\tnullptr, nullptr, nullptr, nullptr\2',
                       txt, count=1)
     if n1 != 1 or n2 != 1:
         print("PATCH FAILED: signature=%d launch=%d; nearby lines:" % (n1, n2))
         for ln in BW.read_text().splitlines():
-            if "dL_dcolors" in ln:
+            if "dL_dinvdepths" in ln:
                 print("   ", repr(ln))
         raise SystemExit(1)
     BW.write_text(txt)
