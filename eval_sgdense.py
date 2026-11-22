@@ -216,7 +216,7 @@ def run(dataset, iteration, pipe, skip_train, skip_test, num_samples, out_dir, j
         boundary_dilate=3):
     # A vanilla (upstream graphdeco) cfg_args carries no segmentation fields;
     # default them so this fork's loader/renderer can score vanilla PLYs too.
-    for k, v in (("seg_encoding_dim", 32), ("num_segmentation_classes", 0),
+    for k, v in (("seg_encoding_dim", 16), ("num_segmentation_classes", 0),
                  ("segmentation_path", "")):
         if not hasattr(dataset, k):
             setattr(dataset, k, v)

@@ -169,7 +169,7 @@ def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations,
 
     # The rasterizer's channel count is a compile-time constant; keep Python-side
     # config honest about it.
-    assert dataset.seg_encoding_dim == 32, "seg_encoding_dim must match NUM_SEG_CHANNELS in cuda_rasterizer/config.h (rebuild required to change)"
+    assert dataset.seg_encoding_dim == 16, "seg_encoding_dim must match NUM_SEG_CHANNELS in cuda_rasterizer/config.h (rebuild required to change)"
 
     # Segmentation decoder: fully decoupled from GaussianModel — own optimizer,
     # own checkpoint path.

@@ -56,7 +56,7 @@ class ModelParams(ParamGroup):
         self.train_test_exp = False
         self.data_device = "cuda"
         self.eval = False
-        self.seg_encoding_dim = 32
+        self.seg_encoding_dim = 16
         self.num_segmentation_classes = 100  # office_0 ids reach 98 (doc 03 §6.4 — safety-critical)
         self.segmentation_path = ""  # folder of uint8 class-id PNGs (255=void); "" disables L_seg
         super().__init__(parser, "Loading Parameters", sentinel)
