@@ -13,6 +13,11 @@ import os
 import json
 import numpy as np
 import torch
+try:
+    import torch.profiler  # for optional CUDA-kernel-level profiling (SGDENSE_TORCH_PROFILE)
+    _TORCH_PROFILER_AVAILABLE = True
+except Exception:
+    _TORCH_PROFILER_AVAILABLE = False
 from random import randint
 from utils.loss_utils import l1_loss, ssim
 from gaussian_renderer import render, network_gui
@@ -203,6 +208,13 @@ def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations,
     if profiler.enabled:
         print(f"[SGDense] iteration profiling ON (spec={profiler.spec}) -> {profiler.out_path}")
 
+    # Optional CUDA-kernel-level profiling over the same window. Enable with
+    # SGDENSE_TORCH_PROFILE=1 (requires the phase profiler window too); prints the
+    # top CUDA kernels at the end of the window. Used to locate backward cost that
+    # the synced phase timers cannot attribute (e.g. kernel vs alloc vs sync).
+    _want_tp = _TORCH_PROFILER_AVAILABLE and bool(os.environ.get("SGDENSE_TORCH_PROFILE"))
+    _tp = None
+
     iter_start = torch.cuda.Event(enable_timing = True)
     iter_end = torch.cuda.Event(enable_timing = True)
 
@@ -343,6 +355,10 @@ def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations,
                 for param_group in decoder_optimizer.param_groups:
                     param_group['lr'] = get_decoder_lr(iteration)
 
+        if _want_tp and _tp is None and profiler.should_profile(iteration):
+            _tp = torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA])
+            _tp.start()
+
         with profiler.phase("backward"):
             # Densification-gradient decoupling (Option A): the photometric(+depth)-
             # only gradient w.r.t. the screen-space means is produced by THIS SAME
@@ -362,6 +378,12 @@ def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations,
             photo_grad = render_pkg.get("dmean2D_photo")
             if photo_grad is not None and photo_grad.numel() > 0:
                 densify_point_grad = photo_grad
+
+        if _tp is not None and not profiler.should_profile(iteration + 1):
+            _tp.stop()
+            print("\n[torch.profiler] top CUDA kernels over the window:\n"
+                  + _tp.key_averages().table(sort_by="cuda_time_total", row_limit=30))
+            _tp = None
 
         iter_end.record()
 
