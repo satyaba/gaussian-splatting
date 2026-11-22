@@ -379,12 +379,6 @@ def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations,
             if photo_grad is not None and photo_grad.numel() > 0:
                 densify_point_grad = photo_grad
 
-        if _tp is not None and not profiler.should_profile(iteration + 1):
-            _tp.stop()
-            print("\n[torch.profiler] top CUDA kernels over the window:\n"
-                  + _tp.key_averages().table(sort_by="cuda_time_total", row_limit=30))
-            _tp = None
-
         iter_end.record()
 
         with torch.no_grad():
@@ -660,6 +654,13 @@ def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations,
             profiler.end_iteration(densify=densify_ran,
                                    warmup=iteration <= opt.seg_warmup_iters,
                                    **extra_meta)
+
+    if _tp is not None:
+        _tp.stop()
+        print("\n[torch.profiler] top CUDA kernels over the window:\n"
+              + _tp.key_averages().table(sort_by="cuda_time_total", row_limit=30),
+              flush=True)
+        _tp = None
 
     # Persist the densification policy for reproducibility / downstream scripts.
     with open(os.path.join(dataset.model_path, "experiment_config.json"), "w") as f:
