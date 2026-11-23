@@ -108,6 +108,66 @@ def test_seg_only_backprop_drives_geometry():
           f"f_dc={gaussians._features_dc.grad.abs().max().item():.4e}")
 
 
+def test_stopgrad_isolates_geometry():
+    # Seg-loss decoupling (lambda_seg_geom=0): a seg-ONLY loss must train the
+    # readout head (seg_encoding) but leave EVERY geometry parameter at exactly
+    # zero gradient. Guards the renderSegCUDA seg_geom_weight path.
+    dataset, pipe, gaussians = build_scene(seed=43)
+    cam = FakeCam()
+
+    gaussians.optimizer.zero_grad(set_to_none=True)
+    out = render(cam, gaussians, pipe, torch.zeros(3, device="cuda"),
+                 seg_geom_weight=0.0, seg_head_weight=1.0)
+    rendered_seg = out["rendered_seg"]
+
+    decoder = SegmentationDecoder(dataset.seg_encoding_dim, dataset.num_segmentation_classes).cuda()
+    logits = decoder(rendered_seg.permute(1, 2, 0))
+    targets = torch.randint(0, dataset.num_segmentation_classes, (H * W,), device="cuda")
+    L_seg = torch.nn.functional.cross_entropy(logits.reshape(-1, dataset.num_segmentation_classes), targets)
+    L_seg.backward()
+
+    # Head still trains.
+    seg_grad = gaussians._segmentation_encoding.grad
+    assert seg_grad is not None and seg_grad.abs().sum().item() > 0.0, \
+        "stop-grad wrongly zeroed the readout-head gradient (dL_dseg_encoding)"
+
+    # Geometry receives EXACTLY zero from the seg-only loss.
+    for name, param in (("xyz", gaussians._xyz), ("opacity", gaussians._opacity), ("scaling", gaussians._scaling)):
+        assert param.grad is None or param.grad.abs().max().item() == 0.0, \
+            f"stop-grad leaked gradient into {name} — seg_geom_weight did not zero the geometry share"
+
+    print("PASS stop-grad isolates geometry while the head still trains")
+    print(f"  |grad| sums: seg={seg_grad.abs().sum().item():.4e} "
+          f"xyz={gaussians._xyz.grad.abs().sum().item() if gaussians._xyz.grad is not None else 0.0:.4e} "
+          f"opacity={gaussians._opacity.grad.abs().sum().item() if gaussians._opacity.grad is not None else 0.0:.4e}")
+
+
+def test_head_off_zeroes_encoding():
+    # Complementary control: seg_geom_weight=1, seg_head_weight=0 => geometry is
+    # driven by L_seg, but dL_dseg_encoding is exactly zero.
+    dataset, pipe, gaussians = build_scene(seed=44)
+    cam = FakeCam()
+
+    gaussians.optimizer.zero_grad(set_to_none=True)
+    out = render(cam, gaussians, pipe, torch.zeros(3, device="cuda"),
+                 seg_geom_weight=1.0, seg_head_weight=0.0)
+    rendered_seg = out["rendered_seg"]
+
+    decoder = SegmentationDecoder(dataset.seg_encoding_dim, dataset.num_segmentation_classes).cuda()
+    logits = decoder(rendered_seg.permute(1, 2, 0))
+    targets = torch.randint(0, dataset.num_segmentation_classes, (H * W,), device="cuda")
+    L_seg = torch.nn.functional.cross_entropy(logits.reshape(-1, dataset.num_segmentation_classes), targets)
+    L_seg.backward()
+
+    seg_grad = gaussians._segmentation_encoding.grad
+    assert seg_grad is None or seg_grad.abs().max().item() == 0.0, \
+        "seg_head_weight=0 did not zero the readout-head gradient"
+    for name, param in (("xyz", gaussians._xyz), ("opacity", gaussians._opacity), ("scaling", gaussians._scaling)):
+        assert param.grad is not None and param.grad.abs().sum().item() > 0.0, \
+            f"seg_head_weight=0 wrongly zeroed geometry gradient on {name}"
+    print("PASS head-off zeroes encoding while geometry still trains")
+
+
 def test_color_only_backprop_unchanged():
     # Control: a photometric-only loss must produce exactly zero seg-encoding
     # gradients (guards against accidentally mixing channels).
@@ -128,5 +188,7 @@ def test_color_only_backprop_unchanged():
 if __name__ == "__main__":
     print("torch", torch.__version__, "cuda", torch.version.cuda)
     test_seg_only_backprop_drives_geometry()
+    test_stopgrad_isolates_geometry()
+    test_head_off_zeroes_encoding()
     test_color_only_backprop_unchanged()
     print("ALL BACKWARD TESTS PASSED")
