@@ -240,6 +240,19 @@ RUNS: Dict[str, RunSpec] = {
                    "--texture_scale_beta", "1.0"),
             notes="20k window + both routes (combined candidate).",
         ),
+        # --- seg-loss decoupling (docs H2/H4): stop-grad variant ---
+        # lambda_seg_geom=0 makes L_seg unable to move geometry (its dL_dalpha share
+        # is zeroed in the rasterizer); the readout head (seg_encoding) still trains.
+        RunSpec(
+            run_id="sgdense_photo25k_stopgrad_30k",
+            method="sgdense",
+            iterations=30_000,
+            seg_num_classes=99,
+            extra=("--floater_action", "freeze",
+                   "--densify_photo_grad_only", "--densify_until_iter", "25000",
+                   "--lambda_seg_geom", "0"),
+            notes="Standard + stop-grad: L_seg drives only the seg readout head, not geometry.",
+        ),
         # --- sanity runs: same configs, 3_000 iters. Enough to cross the seg
         # warmup (2000), run densification + floater/freeze, hit the opacity
         # reset (3000) and save. Use to verify the pipeline runs end-to-end. ---
@@ -279,6 +292,17 @@ RUNS: Dict[str, RunSpec] = {
                    "--densify_photo_grad_only", "--densify_until_iter", "25000"),
             sanity=True,
             notes="SANITY: standard (photo-only + 25k) @3k.",
+        ),
+        RunSpec(
+            run_id="sgdense_photo25k_stopgrad_sanity",
+            method="sgdense",
+            iterations=3_000,
+            seg_num_classes=99,
+            extra=("--floater_action", "freeze",
+                   "--densify_photo_grad_only", "--densify_until_iter", "25000",
+                   "--lambda_seg_geom", "0"),
+            sanity=True,
+            notes="SANITY: stop-grad variant @3k.",
         ),
         RunSpec(
             run_id="sgdense_photo25k_routes_sanity",

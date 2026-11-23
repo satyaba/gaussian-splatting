@@ -98,7 +98,16 @@ class OptimizationParams(ParamGroup):
         self.densify_grad_threshold = 0.0002
         self.depth_l1_weight_init = 1.0
         self.depth_l1_weight_final = 0.01
-        self.lambda_seg = 1.0  # weight on L_seg (segmentation cross-entropy)
+        self.lambda_seg = 1.0  # overall weight on L_seg (segmentation cross-entropy)
+        # Seg-loss decoupling (docs: H2/H4). The single L_seg gradient splits into a
+        # geometry share (dL_dalpha -> xyz/opacity/scaling/rotation, produced inside
+        # the rasterizer's renderSegCUDA) and a readout-head share
+        # (dL_dseg_encoding -> seg_encoding). lambda_seg_geom scales the former;
+        # 0.0 = stop-grad (segmentation cannot move geometry). lambda_seg_head scales
+        # the latter (applied in Python; 0.0 = freeze the readout head). Both are
+        # relative to lambda_seg and default to 1.0 = current behaviour.
+        self.lambda_seg_geom = 1.0
+        self.lambda_seg_head = 1.0
         self.random_background = False
         self.optimizer_type = "default"
         self.seg_encoding_lr = 0.0025

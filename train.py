@@ -283,7 +283,7 @@ def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations,
                   and (iteration % seg_render_interval == 0))
 
         with profiler.phase("render"):
-            render_pkg = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE, num_segmentation_classes=dataset.num_segmentation_classes, do_seg=do_seg)
+            render_pkg = render(viewpoint_cam, gaussians, pipe, bg, use_trained_exp=dataset.train_test_exp, separate_sh=SPARSE_ADAM_AVAILABLE, num_segmentation_classes=dataset.num_segmentation_classes, do_seg=do_seg, seg_geom_weight=opt.lambda_seg_geom, seg_head_weight=opt.lambda_seg_head)
             image, viewspace_point_tensor, visibility_filter, radii, seg_votes = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"], render_pkg["seg_votes"]
 
         with profiler.phase("loss"):
