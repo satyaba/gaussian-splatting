@@ -162,13 +162,13 @@ class SGDenseParams(ParamGroup):
         # evidence growth (see docs). A performance lever, not a free win: ablate.
         self.seg_render_interval = 1
         # --- photo-weight ramp (seg-warmup coupling) ---
-        # On (default) = the photometric term is suppressed to 0 during the seg
-        # warmup and ramps back to full weight over ~10x the warmup length. The
-        # densification trigger reads the photometric(+depth) objective, so the
-        # ramp also damps clone/split pressure across that span. Off = full
-        # photometric weight from iteration 0, decoupling the ramp from the
-        # warmup gate (--seg_warmup_iters) so the two can be ablated separately.
-        self.photo_weight_ramp = True
+        # OFF by default (2026-11-23): the ramp suppressed the photometric term
+        # (and, because the trigger reads the photometric objective, clone/split
+        # pressure) for ~10x the warmup length, which under-densified and hurt
+        # PSNR/SSIM/LPIPS (H1). ON = the photometric term is suppressed to 0 during
+        # the seg warmup and ramps back to full weight over ~10x the warmup length;
+        # enable with --photo_weight_ramp for the historical behaviour.
+        self.photo_weight_ramp = False
         # --- floater lifecycle ('prune' | 'freeze') ---
         self.floater_action = "prune"
         # --- POSITION_BASED_THRESH per-regime scaling-threshold weights ---

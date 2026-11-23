@@ -302,7 +302,7 @@ def training(dataset, opt, pipe, sgdense, testing_iterations, saving_iterations,
             # SGDense photo-weight ramp: the photo term is suppressed during the seg
             # warmup, then ramps back to full weight over ~10x the warmup length.
             photo_weight = 1.0
-            if getattr(sgdense, "photo_weight_ramp", True) and opt.seg_warmup_iters > 0:
+            if getattr(sgdense, "photo_weight_ramp", False) and opt.seg_warmup_iters > 0:
                 if iteration <= opt.seg_warmup_iters:
                     photo_weight = 0.0
                 else:
@@ -765,6 +765,9 @@ if __name__ == "__main__":
     parser.add_argument('--no_texture_based_scale', action='store_false',
                         dest='texture_based_scale')
     parser.add_argument('--no_tex_no_illum_norm', action='store_false', dest='tex_no_illum_norm')
+    # photo_weight_ramp now defaults OFF; --photo_weight_ramp (from ParamGroup's
+    # store_true) re-enables it. The negation is kept as a no-op for callers that
+    # still pass it (e.g. scripts/same_session_kernel_profile.py).
     parser.add_argument('--no_photo_weight_ramp', action='store_false', dest='photo_weight_ramp')
     parser.add_argument('--no_seg_uncertainty_thresh', action='store_false',
                         dest='seg_uncertainty_thresh')

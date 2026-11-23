@@ -98,8 +98,14 @@ resolved policy is written to `<model_path>/experiment_config.json`.
 
 ## 5. Training loop (`train.py`)
 
-- Photo-weight ramp: `photo_weight = min((iteration // seg_warmup_iters)/10, 1.0)`
+- Photo-weight ramp (**default OFF** as of 2026-11-23): when enabled
+  (`--photo_weight_ramp`), `photo_weight = min((iteration // seg_warmup_iters)/10, 1.0)`
   for `iteration > seg_warmup_iters`; `loss = photo_weight*photo + depth + L_seg`.
+  It is off by default because it suppressed the photometric term (and, via the
+  trigger reading the photometric objective, clone/split pressure) for ~10x the
+  warmup length, under-densifying and hurting PSNR/SSIM/LPIPS (H1). The legacy
+  replay specs (`sgdense_30k`, `sgdense_photograd_*`) pin `--photo_weight_ramp`
+  to reproduce their historical baselines.
 - `oneupSHdegree()` every 1000 iters (unconditional).
 - Densification: read 6-tuple → `generate_category_masks` → `densify_and_prune`
   with the four masks + `cfg` + `s_tilde`.

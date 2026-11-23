@@ -75,8 +75,9 @@ blindly.
 
 ## 4. Follow-up: backward register/occupancy (measured)
 
-A/B at matched populations (44k vs 329k → `--no_photo_weight_ramp` to reach
-262k vs 325k) put ~3× of the gap in `backward`. `-Xptxas -v` (sm_75) showed the
+A/B at matched populations (44k vs 329k → `--photo_weight_ramp`/`--no_photo_weight_ramp`
+to reach 262k vs 325k; the ramp is now **OFF by default**) put ~3× of the gap in
+`backward`. `-Xptxas -v` (sm_75) showed the
 cause: the backward `renderCUDA<3>` used **100 registers** vs the stock **64**, so
 it ran at **2 blocks/SM (50% occupancy)** vs 4 blocks (100%). No spills — purely an
 occupancy cap. (The forward was 64 vs 33 registers, but both are thread-capped at
