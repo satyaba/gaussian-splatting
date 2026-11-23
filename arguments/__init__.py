@@ -94,7 +94,7 @@ class OptimizationParams(ParamGroup):
         self.densification_interval = 100
         self.opacity_reset_interval = 3000
         self.densify_from_iter = 500
-        self.densify_until_iter = 25_000  # SGDense standard: extended densification window
+        self.densify_until_iter = 15_000  # densification stops here (upstream default; was 25000)
         self.densify_grad_threshold = 0.0002
         self.depth_l1_weight_init = 1.0
         self.depth_l1_weight_final = 0.01
@@ -111,10 +111,10 @@ class OptimizationParams(ParamGroup):
         self.random_background = False
         self.optimizer_type = "default"
         self.seg_encoding_lr = 0.0025
-        self.seg_warmup_iters = 2_000          # SGDense run26 default
+        self.seg_warmup_iters = 0              # 0 = no warmup freeze (was 2000; also gates the optional photo ramp)
         self.decoder_lr_init = 0.001
         self.decoder_lr_final = 0.0001
-        self.decoder_lr_decay_start = 7_000   # < seg_warmup_iters: decay begins before warmup ends (open tuning item)
+        self.decoder_lr_decay_start = 7_000   # decoder LR flat until here, then exponential decay
         self.decoder_lr_decay_iters = 15_000  # decay spans [decay_start, decay_start + decay_iters]
         # Persisted per-Gaussian segmentation mass histogram (doc 03)
         self.seg_hist_decay = 0.99             # beta: exponential decay per iteration (§6.3)

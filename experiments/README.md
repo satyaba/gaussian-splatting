@@ -73,9 +73,11 @@ regime (`--interior_weight` / `--boundary_weight` / `--other_weight`), while
 
 The SGDense **standard** flips the defaults: the clone/split trigger follows the
 photometric(+depth) gradient only (`--densify_photo_grad_only`, now `True`) and the
-densification window runs to `--densify_until_iter 25000` (now the default). The
-legacy `sgdense_30k` / `sgdense_photograd_30k` specs pin their historical settings
-(total-gradient trigger, 15k window) so the reported baselines stay reproducible.
+densification window default is now `--densify_until_iter 15000` (matches upstream).
+The `sgdense_photo25k_*` / `sgdense_photo20k_*` specs explicitly request their longer
+windows. The legacy `sgdense_30k` / `sgdense_photograd_30k` specs pin their historical
+settings (total-gradient trigger, 15k window, photo-weight ramp) so the reported
+baselines stay reproducible.
 
 The **sanity runs** reuse the exact full-run configs at 3 000 iterations — enough
 to cross the seg warmup (2000), run densification with floater/freeze handling,

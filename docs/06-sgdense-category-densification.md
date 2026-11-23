@@ -86,7 +86,7 @@ to `entropy > tau_entropy_high` (+ the opacity gate for floaters). Corrected in
   photometric(+depth) screen-space gradient only — `--densify_photo_grad_only`,
   **default `True`** (`--no_densify_photo_grad_only` restores the total-loss
   gradient), decoupling densification from `L_seg` — and the window runs to
-  `densify_until_iter` **25 000** (default; upstream was 15 000).
+  `densify_until_iter` **15 000** (default; matches upstream; was 25 000).
 
 Both texture routes read the same cached `s_tilde`; `train.py` computes it when
 either is enabled. `floater_action='freeze'` passes a `freeze_mask` through
@@ -111,7 +111,7 @@ resolved policy is written to `<model_path>/experiment_config.json`.
   with the four masks + `cfg` + `s_tilde`.
 - Saves `seg_hist{N}.npz` (rich metadata) and `experiment_config.json`.
 
-Defaults (run26): `seg_warmup_iters=2000`.
+Defaults: `seg_warmup_iters=0` (no warmup freeze; was 2000), `densify_until_iter=15 000`.
 
 ## 6. Open items
 

@@ -52,11 +52,12 @@ class RunSpec:
 #
 # SGDense standard (after the Option-A decision): the clone/split trigger follows
 # the PHOTOMETRIC (+depth) gradient only (--densify_photo_grad_only, now the
-# default) and the densification window runs to 25k (--densify_until_iter, now
-# the default). The legacy sgdense_30k / sgdense_photograd_30k specs below are
-# PINNED to their historical settings (total-gradient trigger, 15k window) so they
-# keep reproducing the reported baselines. The `sgdense_photo25k_*` grid turns on
-# the standard plus the existing texture/position densification routes.
+# default). The densification-window default is now 15k (--densify_until_iter,
+# matches upstream); the photo25k_*/photo20k_* specs below request their longer
+# windows explicitly. The legacy sgdense_30k / sgdense_photograd_30k specs are
+# PINNED to their historical settings (total-gradient trigger, 15k window,
+# photo-weight ramp, warmup 2000) so they keep reproducing the reported baselines. The
+# `sgdense_photo25k_*` grid turns on the standard plus the texture/position routes.
 RUNS: Dict[str, RunSpec] = {
     r.run_id: r
     for r in (
@@ -74,7 +75,7 @@ RUNS: Dict[str, RunSpec] = {
             seg_num_classes=99,
             extra=("--floater_action", "freeze",
                    "--no_densify_photo_grad_only", "--densify_until_iter", "15000",
-                   "--photo_weight_ramp"),
+                   "--photo_weight_ramp", "--seg_warmup_iters", "2000"),
             notes="LEGACY: floaters frozen; total-gradient trigger, 15k window (pre-Option-A).",
         ),
         RunSpec(
@@ -84,7 +85,7 @@ RUNS: Dict[str, RunSpec] = {
             seg_num_classes=99,
             extra=("--floater_action", "freeze",
                    "--densify_photo_grad_only", "--densify_until_iter", "15000",
-                   "--photo_weight_ramp"),
+                   "--photo_weight_ramp", "--seg_warmup_iters", "2000"),
             notes="LEGACY: Option A (photo-only trigger) at the original 15k window.",
         ),
         RunSpec(
@@ -94,7 +95,7 @@ RUNS: Dict[str, RunSpec] = {
             seg_num_classes=99,
             extra=("--floater_action", "freeze",
                     "--densify_photo_grad_only", "--densify_until_iter", "15000",
-                    "--photo_weight_ramp",
+                    "--photo_weight_ramp", "--seg_warmup_iters", "2000",
                     "--texture_based_scale", "--texture_scale_beta", "1.0"),
             notes="Photo-only gradient trigger + texture-based per-class size thresholds (Beta=1.0).",
         ),
@@ -105,7 +106,7 @@ RUNS: Dict[str, RunSpec] = {
             seg_num_classes=99,
             extra=("--floater_action", "freeze",
                     "--densify_photo_grad_only", "--densify_until_iter", "15000",
-                    "--photo_weight_ramp",
+                    "--photo_weight_ramp", "--seg_warmup_iters", "2000",
                    "--texture_based_thresh", "--texture_beta", "-0.25"),
             notes="Photo-only gradient trigger + texture-based per-class gradient thresholds (Beta=-0.25).",
         ),
@@ -116,7 +117,7 @@ RUNS: Dict[str, RunSpec] = {
             seg_num_classes=99,
             extra=("--floater_action", "freeze",
                     "--densify_photo_grad_only", "--densify_until_iter", "15000",
-                    "--photo_weight_ramp",
+                    "--photo_weight_ramp", "--seg_warmup_iters", "2000",
                     "--position_based_thresh", 
                     "--interior_weight", "0.5",
                     "--boundary_weight", "0.3",
@@ -275,7 +276,7 @@ RUNS: Dict[str, RunSpec] = {
             seg_num_classes=99,
             extra=("--floater_action", "freeze",
                    "--no_densify_photo_grad_only", "--densify_until_iter", "15000",
-                   "--photo_weight_ramp"),
+                   "--photo_weight_ramp", "--seg_warmup_iters", "2000"),
             sanity=True,
             notes="SANITY: LEGACY SGDense config @3k (total-gradient trigger).",
         ),
@@ -286,7 +287,7 @@ RUNS: Dict[str, RunSpec] = {
             seg_num_classes=99,
             extra=("--floater_action", "freeze",
                    "--densify_photo_grad_only", "--densify_until_iter", "15000",
-                   "--photo_weight_ramp"),
+                   "--photo_weight_ramp", "--seg_warmup_iters", "2000"),
             sanity=True,
             notes="SANITY: LEGACY Option A (photo-only densify) @3k.",
         ),

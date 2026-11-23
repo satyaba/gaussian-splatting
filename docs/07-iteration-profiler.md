@@ -63,8 +63,9 @@ python -m experiments.profile --compare \
     --vanilla-json  <model>/iter_profile.json
 ```
 
-The window should sit **after** the SGDense warmup (`seg_warmup_iters`, 2000)
-and **inside** the densification window (`densify_until_iter`, default 25000), and
+The window should sit **inside** the densification window
+(`densify_until_iter`, default 15 000; after the warmup gate, `seg_warmup_iters`,
+default 0), and
 should contain exactly one `% 100 == 0` boundary so both methods have one
 densify event. `3999:4099` satisfies all three (event at 4000).
 
