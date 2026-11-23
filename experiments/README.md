@@ -79,9 +79,27 @@ windows. The legacy `sgdense_30k` / `sgdense_photograd_30k` specs pin their hist
 settings (total-gradient trigger, 15k window, photo-weight ramp) so the reported
 baselines stay reproducible.
 
+#### Tier 1–4 grid (2026-11-23)
+
+On the reset defaults (`seg_warmup_iters=0`, `densify_until_iter=15000`,
+`photo_weight_ramp` off, `floater_action=freeze`); all pin the 15k window unless
+stated. `SG` = `--lambda_seg_geom 0` (stop-grad). All ids share the
+`sgdense_photo15k_` prefix.
+
+| tier | question | variants (suffix after `sgdense_photo15k_`) |
+|---|---|---|
+| 1 | ramp (H1) vs decoupling (H2) attribution | `segon_30k`, `stopgrad_30k`, `segon_rampon_30k`, `stopgrad_rampon_30k` |
+| 2 | LPIPS / Gaussian count / refine budget | `stopgrad_prune_30k`, `stopgrad_w20k_30k`, `stopgrad_w25k_30k`, `stopgrad_dense_30k`, `stopgrad_prune_w20k_30k` |
+| 3 | mechanism isolation (seg-guided density control) | `stopgrad_nofloaters_30k`, `stopgrad_pos_30k`, `stopgrad_texgrad_30k`, `stopgrad_texscale_30k`, `stopgrad_place_30k` |
+| 4 | performance (seg-render interval) | `stopgrad_segk4_30k`, `stopgrad_segk8_30k` |
+
+The `_rampon_` cells pin `--seg_warmup_iters 2000` (the ramp is gated on
+`seg_warmup_iters > 0`). Sanity variants: `sgdense_photo15k_segon_sanity`,
+`sgdense_photo15k_stopgrad_sanity`.
+
 The **sanity runs** reuse the exact full-run configs at 3 000 iterations — enough
-to cross the seg warmup (2000), run densification with floater/freeze handling,
-hit the opacity reset (3000), and save. Use them to verify the whole pipeline
+to run densification with floater/freeze handling, hit the opacity reset (3000),
+and save. Use them to verify the whole pipeline
 (train → rasterizer swap → metric extraction) before committing to 30 000 iters.
 `--all` / `extract_all()` skip sanity runs; `--sanity` / `extract_sanity()` run
 only them.
